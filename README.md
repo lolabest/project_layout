@@ -26,11 +26,16 @@ Open the local URL printed by Vite (usually `http://localhost:5173`).
 
 ```
 src/
-  models/types.ts          Typed models (sessions, viewports, issues, reports)
+  models/types.ts          Typed models (sessions, viewports, LayoutIssue, reports)
   engine/
-    analyzer.ts            Layout / a11y detection (UI-independent)
-    domUtils.ts            Selectors, geometry helpers
-    measurements.ts        Element box-model measurement + temp CSS
+    analyzer.ts            LayoutAnalyzer service + detection rules
+    selectors.ts           Stable CSS selectors + DOM paths
+    viewportUtils.ts       Viewport validation / orientation
+    stabilize.ts           Font/image/rAF layout stabilization
+    scoring.ts             Layout Health Score + sorting
+    issueLifecycle.ts      Ignore / stale / delta / cross-viewport grouping
+    sourceState.ts         Source state machine
+    measurements.ts        Box-model measurement + CSS edit session
     validation.ts          URL/markup validation + srcdoc builder
     comparison.ts          Reference vs rendered image diff
     screenshot.ts          Same-origin iframe capture (html2canvas)
@@ -40,7 +45,7 @@ src/
   App.tsx                  Application wiring
 ```
 
-The **analysis engine is separated from the UI**. Components call into `engine/*`; checks can be unit-tested without mounting React.
+The **LayoutAnalyzer** is independent of React. UI calls into `engine/*`; rules are unit-tested without mounting components.
 
 ### Data flow
 
