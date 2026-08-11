@@ -1,0 +1,91 @@
+:root {
+  --bg-app: #0f1115;
+  --bg-panel: #161a22;
+  --bg-panel-elevated: #1c2230;
+  --bg-input: #0c0e13;
+  --bg-hover: #232a38;
+  --bg-active: #2b3345;
+  --border: #2a3140;
+  --border-strong: #3a4458;
+  --text: #e8eaed;
+  --text-muted: #9aa3b2;
+  --text-dim: #6b7382;
+  --accent: #3d8bfd;
+  --accent-hover: #5a9fff;
+  --accent-soft: rgba(61, 139, 253, 0.15);
+  --danger: #ff6b6b;
+  --warning: #ffb020;
+  --info: #6cb6ff;
+  --success: #3dd68c;
+  --focus: #3d8bfd;
+  --ruler: #4a5568;
+  --grid: rgba(61, 139, 253, 0.18);
+  --breakpoint: rgba(255, 176, 32, 0.55);
+  --font-ui: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --radius: 6px;
+  --toolbar-h: 44px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3a4458;
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
