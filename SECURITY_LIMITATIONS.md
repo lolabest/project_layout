@@ -1,24 +1,28 @@
 # Security Limitations
 
-This tool runs entirely in the browser and **does not bypass**:
+The tool respects browser security. It does **not** bypass:
 
 - CORS
-- CSP (`frame-ancestors` and related)
+- CSP (`frame-ancestors`, etc.)
 - X-Frame-Options
 - authentication walls
 - iframe sandbox restrictions
 
 ## Capability matrix
 
-| Capability | Same-origin / srcdoc | Cross-origin blocked |
-| --- | --- | --- |
-| Preview | Yes | Maybe / No |
-| DOM inspection | Yes | No |
-| Screenshots | Yes | No |
-| Reference comparison | Yes (with capture) | No |
+| Capability | Meaning |
+|---|---|
+| PreviewAvailable | Document can be shown in the sandboxed iframe |
+| DomInspectionAvailable | Same-origin access to DOM for rules |
+| ScreenshotAvailable | Canvas capture of preview possible |
+| ReferenceComparisonAvailable | Both reference image + rendered capture available |
 
-When inspection is unavailable, the UI reports a **capability limitation** with guidance to switch to HTML/CSS mode.
+An external site may allow preview but block DOM inspection. That is surfaced as a capability state, not an application failure. Switch to pasted HTML/CSS for full analysis.
 
-Pasted markup uses a sandboxed iframe (`allow-scripts allow-same-origin`) via `srcdoc`.
+## Diagnostics
 
-Diagnostics must not include sensitive page content beyond selectors and measurements needed for layout evidence.
+Diagnostic events never intentionally include full page content or secrets. Persistence failures (quota) do not crash the app.
+
+## Report integrity
+
+Exported reports include `schemaVersion`, rule/scoring policy versions, source fingerprint, and an `integrityHash` over the machine-readable snapshot.

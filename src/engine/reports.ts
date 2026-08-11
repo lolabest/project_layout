@@ -1,3 +1,6 @@
+import { hashString } from '../domain/fingerprint'
+import { SCORING_POLICY_VERSION } from '../domain/scoring/scorePolicy'
+import { RULE_ENGINE_VERSION } from '../infrastructure/rules/LayoutRuleEngine'
 import type {
   LayoutIssue,
   MultiViewportSummary,
@@ -8,34 +11,59 @@ import type {
   ViewportSize,
   ViewportTestResult,
 } from '../models/types'
-import { KNOWN_ANALYSIS_LIMITATIONS } from '../models/types'
+import { ACCESSIBILITY_ISSUE_TYPES, KNOWN_ANALYSIS_LIMITATIONS, OVERFLOW_ISSUE_TYPES } from '../models/types'
 import { createId } from './domUtils'
 import { countActiveIssues, groupIssuesAcrossViewports } from './issueLifecycle'
 import { calculateHealthScore, calculateHealthScoreFromGrouped } from './scoring'
 
-const SESSIONS_KEY = 'layout-tester.sessions'
-const MAX_SESSIONS = 20
+export function createReportIntegrityHash(report: Omit<TestReport, 'integrityHash'>): string {
+  const payload = [
+    report.schemaVersion,
+    report.sessionId ?? '',
+    report.sourceFingerprint ?? '',
+    report.ruleEngineVersion ?? '',
+    report.scoringPolicyVersion ?? '',
+    String(report.overallHealthScore ?? ''),
+    String(report.coveragePercent ?? ''),
+    report.issues.map((i) => i.id).sort().join(','),
+    report.ignoredIssues?.map((i) => i.id).sort().join(',') ?? '',
+  ].join('|')
+  return hashString(payload)
+}
 
 export function createReport(input: {
   sourceName: string
   sourceMode: SourceMode
-  sourceUrl?: string
+  sourceUrl?: string | undefined
   viewport: ViewportSize
-  viewports?: ViewportSize[]
+  viewports?: ViewportSize[] | undefined
   issues: LayoutIssue[]
-  screenshots?: string[]
+  screenshots?: string[] | undefined
   temporaryFixes?: TestReport['temporaryFixes']
   measurements?: TestReport['measurements']
+  sessionId?: string | undefined
+  sourceFingerprint?: string | undefined
+  coveragePercent?: number | undefined
+  coverageWarning?: string | null | undefined
+  failedRules?: TestReport['failedRules']
+  skippedRules?: TestReport['skippedRules']
+  diagnosticSummary?: string[] | undefined
+  analysisConfiguration?: TestReport['analysisConfiguration']
 }): TestReport {
-  const active = input.issues.filter((i) => i.lifecycle !== 'ignored')
+  const active = input.issues.filter((i) => i.lifecycle !== 'ignored' && i.lifecycle !== 'resolved')
   const ignored = input.issues.filter((i) => i.lifecycle === 'ignored')
+  const resolved = input.issues.filter((i) => i.lifecycle === 'resolved')
   const recommendations = Array.from(new Set(active.map((issue) => issue.recommendation)))
   const viewports = input.viewports ?? [input.viewport]
   const grouped = groupIssuesAcrossViewports(active, viewports)
   const health = calculateHealthScoreFromGrouped(grouped)
+  const healthDetail = calculateHealthScore(active)
 
-  return {
+  const draft: Omit<TestReport, 'integrityHash'> = {
+    schemaVersion: 1,
     id: createId('report'),
+    sessionId: input.sessionId,
+    sourceFingerprint: input.sourceFingerprint ?? active[0]?.sourceFingerprint,
     sourceName: input.sourceName,
     sourceMode: input.sourceMode,
     sourceUrl: input.sourceUrl,
@@ -48,15 +76,46 @@ export function createReport(input: {
     recommendations,
     overallHealthScore: health.score,
     scoreLabel: health.label,
+    scoreBreakdown: {
+      policyVersion: SCORING_POLICY_VERSION,
+      startingScore: 100,
+      finalScore: healthDetail.score,
+      lines: healthDetail.deductions.map((d) => ({
+        key: `${d.ruleId}::${d.selector}`,
+        amount: d.amount,
+        reason: d.reason,
+      })),
+    },
+    coveragePercent: input.coveragePercent,
+    coverageWarning: input.coverageWarning,
     ignoredIssues: ignored,
+    resolvedIssues: resolved,
     temporaryFixes: input.temporaryFixes ?? [],
     knownLimitations: KNOWN_ANALYSIS_LIMITATIONS,
     measurements: input.measurements ?? null,
+    ruleEngineVersion: RULE_ENGINE_VERSION,
+    scoringPolicyVersion: SCORING_POLICY_VERSION,
+    failedRules: input.failedRules ?? [],
+    skippedRules: input.skippedRules ?? [],
+    diagnosticSummary: input.diagnosticSummary ?? [],
+    analysisConfiguration: input.analysisConfiguration,
+  }
+
+  return {
+    ...draft,
+    integrityHash: createReportIntegrityHash(draft),
   }
 }
 
 export function exportReportJson(report: TestReport): string {
-  return JSON.stringify(report, null, 2)
+  return JSON.stringify(
+    {
+      ...report,
+      exportFormatVersion: 1,
+    },
+    null,
+    2,
+  )
 }
 
 export function exportReportHtml(report: TestReport): string {
@@ -88,6 +147,13 @@ export function exportReportHtml(report: TestReport): string {
     )
     .join('')
 
+  const coverageLine =
+    report.coveragePercent != null
+      ? `<div><strong>Analysis coverage:</strong> ${report.coveragePercent}%${
+          report.coverageWarning ? ` — ${escapeHtml(report.coverageWarning)}` : ''
+        }</div>`
+      : ''
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -117,11 +183,17 @@ export function exportReportHtml(report: TestReport): string {
     <div><strong>Source:</strong> ${escapeHtml(report.sourceName)}</div>
     <div><strong>Mode:</strong> ${escapeHtml(report.sourceMode)}</div>
     ${report.sourceUrl ? `<div><strong>URL:</strong> ${escapeHtml(report.sourceUrl)}</div>` : ''}
+    ${report.sessionId ? `<div><strong>Session:</strong> ${escapeHtml(report.sessionId)}</div>` : ''}
+    ${report.sourceFingerprint ? `<div><strong>Fingerprint:</strong> <code>${escapeHtml(report.sourceFingerprint)}</code></div>` : ''}
     <div><strong>Tested:</strong> ${escapeHtml(new Date(report.testedAt).toLocaleString())}</div>
     <div><strong>Viewport:</strong> ${report.viewport.width} × ${report.viewport.height} (${escapeHtml(report.viewport.name)})</div>
     <div><strong>Issues (active):</strong> ${report.issues.length}</div>
     <div><strong>Ignored:</strong> ${report.ignoredIssues?.length ?? 0}</div>
+    <div><strong>Resolved:</strong> ${report.resolvedIssues?.length ?? 0}</div>
+    ${coverageLine}
     <div class="score">Health score: ${report.overallHealthScore ?? '—'} (${escapeHtml(report.scoreLabel ?? 'n/a')}) — not a formal a11y compliance score</div>
+    <div><strong>Rule engine:</strong> ${escapeHtml(report.ruleEngineVersion ?? 'n/a')} · <strong>Scoring policy:</strong> ${escapeHtml(report.scoringPolicyVersion ?? 'n/a')}</div>
+    ${report.integrityHash ? `<div><strong>Integrity:</strong> <code>${escapeHtml(report.integrityHash)}</code></div>` : ''}
   </div>
   <h2>Grouped Issues</h2>
   <table>
@@ -180,62 +252,24 @@ export function downloadTextFile(filename: string, content: string, mime: string
   URL.revokeObjectURL(url)
 }
 
-export function loadSessions(): TestSession[] {
-  try {
-    const raw = localStorage.getItem(SESSIONS_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as TestSession[]
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
-
-export function saveSession(session: TestSession): TestSession[] {
-  try {
-    const sessions = loadSessions().filter((s) => s.id !== session.id)
-    const next = [{ ...session, updatedAt: new Date().toISOString() }, ...sessions]
-      .filter((s) => s.status === 'Completed' || s.status === 'Completed with errors' || s.status === 'Failed' || s.status === 'Draft')
-      .slice(0, MAX_SESSIONS)
-    // Keep last 20 completed-ish sessions (includes draft saves from UI)
-    const completed = next.filter((s) => s.status !== 'Running').slice(0, MAX_SESSIONS)
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(completed))
-    return completed
-  } catch {
-    return loadSessions()
-  }
-}
-
-export function deleteSession(id: string): TestSession[] {
-  try {
-    const next = loadSessions().filter((s) => s.id !== id)
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(next))
-    return next
-  } catch {
-    return loadSessions()
-  }
-}
-
 export function createSession(partial: {
   name: string
   source: TestSession['source']
   selectedViewports: ViewportSize[]
-  status?: TestStatus
-  results?: ViewportTestResult[]
-  ignoredIssueKeys?: Record<string, string>
+  status?: TestStatus | undefined
+  results?: ViewportTestResult[] | undefined
+  ignoredIssueKeys?: Record<string, string> | undefined
   temporaryFixes?: TestSession['temporaryFixes']
-  report?: TestReport
-  multiViewportSummary?: MultiViewportSummary
-  viewport?: ViewportSize
+  report?: TestReport | undefined
+  multiViewportSummary?: MultiViewportSummary | undefined
+  viewport?: ViewportSize | undefined
   orientation?: TestSession['orientation']
-  scale?: number
-  issues?: LayoutIssue[]
+  scale?: number | undefined
+  issues?: LayoutIssue[] | undefined
 }): TestSession {
   const now = new Date().toISOString()
   const results = partial.results ?? []
-  const issues =
-    partial.issues ??
-    results.flatMap((r) => r.issues)
+  const issues = partial.issues ?? results.flatMap((r) => r.issues)
   const bySeverity = {
     critical: issues.filter((i) => i.severity === 'critical' && i.lifecycle !== 'ignored').length,
     warning: issues.filter((i) => i.severity === 'warning' && i.lifecycle !== 'ignored').length,
@@ -279,6 +313,8 @@ export function summarizeMultiViewport(
     viewports,
   )
   const health = calculateHealthScoreFromGrouped(grouped)
+  const a11y = new Set<string>(ACCESSIBILITY_ISSUE_TYPES)
+  const overflow = new Set<string>(OVERFLOW_ISSUE_TYPES)
 
   return {
     id: createId('multi'),
@@ -287,14 +323,8 @@ export function summarizeMultiViewport(
     results,
     totalIssues: grouped.length,
     totalCritical: grouped.filter((g) => g.severity === 'critical').length,
-    totalOverflow: grouped.filter((g) =>
-      ['horizontal-overflow', 'outside-viewport', 'image-overflow'].includes(g.type),
-    ).length,
-    totalAccessibility: grouped.filter((g) =>
-      ['missing-alt', 'broken-image', 'broken-link', 'small-touch-target', 'inaccessible-control'].includes(
-        g.type,
-      ),
-    ).length,
+    totalOverflow: grouped.filter((g) => overflow.has(g.type)).length,
+    totalAccessibility: grouped.filter((g) => a11y.has(g.type)).length,
     overallHealthScore: health.score,
     scoreLabel: health.label,
     groupedIssues: grouped,
@@ -306,28 +336,25 @@ export function buildViewportResult(
   issues: LayoutIssue[],
   screenshotDataUrl: string | null,
   status: ViewportTestResult['status'] = 'success',
-  errorMessage?: string,
+  errorMessage?: string | undefined,
 ): ViewportTestResult {
   const active = issues.filter((i) => i.lifecycle !== 'ignored')
   const health = calculateHealthScore(active)
-  return {
+  const a11y = new Set<string>(ACCESSIBILITY_ISSUE_TYPES)
+  const overflow = new Set<string>(OVERFLOW_ISSUE_TYPES)
+  const result: ViewportTestResult = {
     viewport,
     issues,
     screenshotDataUrl,
     criticalCount: active.filter((i) => i.severity === 'critical').length,
-    overflowCount: active.filter((i) =>
-      ['horizontal-overflow', 'outside-viewport', 'image-overflow'].includes(i.type),
-    ).length,
-    accessibilityCount: active.filter((i) =>
-      ['missing-alt', 'broken-image', 'broken-link', 'small-touch-target', 'inaccessible-control'].includes(
-        i.type,
-      ),
-    ).length,
+    overflowCount: active.filter((i) => overflow.has(i.type)).length,
+    accessibilityCount: active.filter((i) => a11y.has(i.type)).length,
     healthScore: health.score,
     scoreLabel: health.label,
     status,
-    errorMessage,
   }
+  if (errorMessage !== undefined) result.errorMessage = errorMessage
+  return result
 }
 
 export function finalizeSessionStatus(results: ViewportTestResult[]): TestStatus {
@@ -336,4 +363,36 @@ export function finalizeSessionStatus(results: ViewportTestResult[]): TestStatus
   if (successes === results.length) return 'Completed'
   if (successes > 0) return 'Completed with errors'
   return 'Failed'
+}
+
+/** @deprecated Prefer sessionRepository via AnalysisApplicationService — kept for tests. */
+export function loadSessions(): TestSession[] {
+  try {
+    const raw = localStorage.getItem('layout-tester.sessions.v2')
+    if (raw) {
+      const parsed = JSON.parse(raw) as Array<{ schemaVersion: number; session: TestSession }>
+      if (Array.isArray(parsed)) {
+        return parsed.map((e) => e.session).filter(Boolean)
+      }
+    }
+    const legacy = JSON.parse(localStorage.getItem('layout-tester.sessions') ?? '[]') as TestSession[]
+    return Array.isArray(legacy) ? legacy : []
+  } catch {
+    return []
+  }
+}
+
+/** @deprecated Prefer AnalysisApplicationService.saveSession */
+export function saveSession(session: TestSession): TestSession[] {
+  const sessions = loadSessions().filter((s) => s.id !== session.id)
+  const next = [{ ...session, updatedAt: new Date().toISOString() }, ...sessions].slice(0, 20)
+  try {
+    localStorage.setItem(
+      'layout-tester.sessions.v2',
+      JSON.stringify(next.map((s) => ({ schemaVersion: 2, session: s }))),
+    )
+  } catch {
+    return loadSessions()
+  }
+  return next
 }

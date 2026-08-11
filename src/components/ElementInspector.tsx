@@ -6,9 +6,11 @@ interface ElementInspectorProps {
   measurements: ElementMeasurements | null
   onApplyStyles: (styles: Record<string, string>) => void
   onUndo: () => void
+  onRedo: () => void
   onResetElement: () => void
   onResetAll: () => void
   canUndo: boolean
+  canRedo: boolean
   issueDelta: IssueDelta | null
   scoreBefore: number | null
   scoreAfter: number | null
@@ -33,9 +35,11 @@ export function ElementInspector({
   measurements,
   onApplyStyles,
   onUndo,
+  onRedo,
   onResetElement,
   onResetAll,
   canUndo,
+  canRedo,
   issueDelta,
   scoreBefore,
   scoreAfter,
@@ -149,6 +153,9 @@ export function ElementInspector({
         </button>
         <button type="button" onClick={onUndo} disabled={!canUndo}>
           Undo last
+        </button>
+        <button type="button" onClick={onRedo} disabled={!canRedo}>
+          Redo
         </button>
         <button type="button" onClick={onResetElement}>
           Reset element

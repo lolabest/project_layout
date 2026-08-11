@@ -20,7 +20,7 @@ export interface ScoreableIssue {
   severity: Severity
   confidence: number
   category: IssueCategory
-  lifecycle: IssueLifecycleState | 'open' | 'resolved' | 'ignored' | 'stale'
+  lifecycle: IssueLifecycleState | 'open' | 'resolved' | 'ignored' | 'stale' | 'unable-to-verify'
 }
 
 export interface ScoreBreakdownLine {

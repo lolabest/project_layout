@@ -12,7 +12,7 @@ export interface RuleContext {
     domInspectionAvailable: boolean
     screenshotAvailable: boolean
   }
-  signal?: AbortSignal
+  signal?: AbortSignal | undefined
   limits: {
     maxElements: number
     maxOverlapCandidates: number
@@ -27,15 +27,15 @@ export interface RuleIssueData {
   explanation: string
   selector: string
   elementPath: string
-  tagName?: string
+  tagName?: string | undefined
   category: IssueCategory
   confidence: number
   actual: Record<string, number | string | boolean | null>
   expected: Record<string, number | string | boolean | null>
-  evidenceStyles?: Record<string, string>
-  overflowArea?: number
-  intersectionArea?: number
-  boundingRect?: { top: number; left: number; width: number; height: number }
+  evidenceStyles?: Record<string, string> | undefined
+  overflowArea?: number | undefined
+  intersectionArea?: number | undefined
+  boundingRect?: { top: number; left: number; width: number; height: number } | undefined
   recommendation: string
   measurementSignature: string
 }
@@ -46,8 +46,8 @@ export interface RuleResult {
   inspectedElements: number
   durationMs: number
   warnings: string[]
-  skipReason?: string
-  diagnostic?: string
+  skipReason?: string | undefined
+  diagnostic?: string | undefined
 }
 
 export interface AnalysisRule {
@@ -57,7 +57,7 @@ export interface AnalysisRule {
   category: IssueCategory
   defaultSeverity: Severity
   version: string
-  supports(context: RuleContext): { applicable: boolean; reason?: string }
+  supports(context: RuleContext): { applicable: boolean; reason?: string | undefined }
   evaluate(context: RuleContext): RuleResult
   getRecommendation(issueData: RuleIssueData): string
 }

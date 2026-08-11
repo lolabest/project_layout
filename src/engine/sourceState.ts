@@ -78,7 +78,12 @@ export function beginSourceLoad(
 
 export function completeSourceLoad(
   current: SourceControllerState,
-  result: { blocked: boolean; accessible: boolean; failed?: boolean; message?: string },
+  result: {
+    blocked: boolean
+    accessible: boolean
+    failed?: boolean | undefined
+    message?: string | undefined
+  },
 ): SourceControllerState {
   if (result.failed) {
     return {

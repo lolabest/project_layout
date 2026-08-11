@@ -1,40 +1,57 @@
 # Architecture
 
+Layered layout analysis system. Domain and application layers are testable without React.
+
 ## Layers
 
 ```
 presentation/   React components + App.tsx (UI state only)
-application/    Use-case orchestration (AnalysisApplicationService)
-domain/         State machines, scoring, fingerprinting, Result/Error types
-infrastructure/ Rule engine, persistence, DOM/screenshot adapters
-engine/         Shared helpers + backward-compatible facades
+application/    Use cases + AnalysisApplicationService + diagnostics
+domain/         Entities, IDs, Result/errors, state machines, scoring, fingerprint, coverage
+infrastructure/ Rule engine, rule registry, builtin rules, LocalStorageSessionRepository
+engine/         DOM helpers, stabilize, validation, reports, measurements (browser adapters)
 ```
 
-## Dependency rule
+## Rules for presentation
 
-`presentation → application → domain`  
-`application → infrastructure` (via ports / concrete adapters)  
-`infrastructure → domain`  
-React components must **not** detect issues, score, persist sessions, or generate reports.
+React components must **not**:
 
-## Key services
+- detect layout problems
+- calculate health scores (display scores produced by analysis)
+- group/deduplicate issues
+- control session state transitions
+- access `localStorage` directly
+- generate reports from React state
 
-| Service | Responsibility |
-| --- | --- |
-| `AnalysisApplicationService` | Load/validate source, create session, run/cancel analysis, ignore issues, export, restore sessions |
-| `LayoutRuleEngine` + `RuleRegistry` | Execute applicable rules independently; collect executions + issues |
-| `LocalStorageSessionRepository` | Versioned session persistence (schema v2, max 20, quota-safe) |
-| `DiagnosticLogger` | In-memory structured events (replaceable telemetry adapter) |
+UI calls `analysisApp` / `application/usecases/*` and renders results.
 
-## Analysis pipeline (per viewport)
+## Domain entities
 
-1. Validate source / capabilities  
-2. Apply viewport + prepare preview  
-3. Stabilize (load, fonts, images, rAF, quiet period)  
-4. Run applicable rules via engine  
-5. Deduplicate / score / coverage  
-6. Persist viewport result  
+See `src/domain/entities/index.ts`:
 
-## Capabilities
+`SourceDocument`, `Viewport`, `AnalysisSession`, `ViewportRun`, `AnalysisRuleDefinition`, `RuleExecution`, `LayoutIssueEntity`, `ElementReference`, `ElementMeasurement`, `TemporaryStyleChangeEntity`, `IssueResolution`, `ReferenceComparison`, `AnalysisReport`.
 
-Preview, DOM inspection, screenshots, and reference comparison are tracked separately. A blocked cross-origin page is a **capability limitation**, not treated as an unexplained application crash.
+Branded IDs live in `src/domain/ids.ts`.
+
+## Use cases
+
+Explicit modules in `src/application/usecases/index.ts`:
+
+LoadSource, ValidateSource, CreateAnalysisSession, RunActiveViewportAnalysis, RunAllViewportsAnalysis, CancelAnalysisSession, RerunAnalysis, ApplyTemporaryStyle, UndoTemporaryStyle, RedoTemporaryStyle, ResetTemporaryStyles, IgnoreIssue, RestoreIgnoredIssue, CompareWithReference, GenerateReport, RestorePreviousSession, DeleteSession.
+
+Each returns `Result<T, AppError>`.
+
+## State machines
+
+- Source: Empty → Dirty → Validating → Ready → Loading → Loaded | Blocked | Failed
+- Session: Draft → Queued → Running → Cancelling → Cancelled | Completed | CompletedWithErrors | Failed (terminal)
+- Viewport run: Pending → Preparing → Stabilising → Analysing → Completed | Skipped | Failed | Cancelled
+- Issue: Open ↔ Ignored / Resolved / Stale / UnableToVerify (with reopen rules)
+
+## Rule engine
+
+`LayoutRuleEngine` + `RuleRegistry` + 18 builtin rules. One failed rule does not abort analysis. Skipped rules carry reasons and count toward coverage, not failures.
+
+## Persistence
+
+`SessionRepository` → `LocalStorageSessionRepository` (schema v2, migrate legacy, max 20, quota-safe).

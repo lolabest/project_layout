@@ -1,4 +1,11 @@
-import type { AnalysisResult, AnalyzerOptions, LayoutIssue, Severity, ViewportSize } from '../models/types'
+import type {
+  AnalysisResult,
+  AnalyzerOptions,
+  AppError,
+  LayoutIssue,
+  Severity,
+  ViewportSize,
+} from '../models/types'
 import { capabilitiesFromPreview } from '../domain/capabilities'
 import { layoutRuleEngine } from '../infrastructure/rules/LayoutRuleEngine'
 import {
@@ -37,7 +44,7 @@ function ruleContext(doc: Document, viewport: ViewportSize, signal?: AbortSignal
       domInspectionAvailable: true,
       screenshotAvailable: true,
     },
-    signal,
+    ...(signal ? { signal } : {}),
     limits: DEFAULT_RULE_LIMITS,
   }
 }
@@ -61,26 +68,29 @@ function runSingleRule(
   const support = rule.supports(ctx)
   if (!support.applicable) return []
   const result = rule.evaluate(ctx)
-  return result.issues.map((data) => ({
-    id: `issue-${rule.id}-${data.selector}`,
-    ruleId: String(rule.id),
-    type: String(rule.id) as LayoutIssue['type'],
-    severity: data.severity,
-    title: data.title,
-    description: data.explanation,
-    selector: data.selector,
-    elementPath: data.elementPath,
-    viewport,
-    measuredValues: data.actual,
-    expectedValues: data.expected,
-    recommendation: rule.getRecommendation(data),
-    confidence: data.confidence,
-    timestamp: new Date().toISOString(),
-    lifecycle: 'open' as const,
-    issueKey: `${rule.id}::${data.selector}::${viewport.id}`,
-    tagName: data.tagName,
-    boundingRect: data.boundingRect,
-  }))
+  return result.issues.map((data) => {
+    const issue: LayoutIssue = {
+      id: `issue-${rule.id}-${data.selector}`,
+      ruleId: String(rule.id),
+      type: String(rule.id) as LayoutIssue['type'],
+      severity: data.severity,
+      title: data.title,
+      description: data.explanation,
+      selector: data.selector,
+      elementPath: data.elementPath,
+      viewport,
+      measuredValues: data.actual,
+      expectedValues: data.expected,
+      recommendation: rule.getRecommendation(data),
+      confidence: data.confidence,
+      timestamp: new Date().toISOString(),
+      lifecycle: 'open',
+      issueKey: `${rule.id}::${data.selector}::${viewport.id}`,
+    }
+    if (data.tagName !== undefined) issue.tagName = data.tagName
+    if (data.boundingRect !== undefined) issue.boundingRect = data.boundingRect
+    return issue
+  })
 }
 
 export function detectHorizontalOverflow(doc: Document, viewport: ViewportSize): LayoutIssue[] {
@@ -154,7 +164,7 @@ export function analyzeDocument(
     viewport,
     sourceFingerprint: 'legacy-analyzeDocument',
     capabilities: capabilitiesFromPreview({ loaded: true, blocked: false, accessible: true }),
-    signal,
+    ...(signal ? { signal } : {}),
   })
 
   return {
@@ -163,12 +173,15 @@ export function analyzeDocument(
     accessible: true,
     ruleErrors: result.executions
       .filter((e) => e.status === 'failed')
-      .map((e) => ({
-        category: 'rule-execution-failed' as const,
-        message: `Rule "${e.ruleId}" failed and was skipped.`,
-        diagnostic: e.diagnostic,
-        timestamp: new Date().toISOString(),
-      })),
+      .map((e) => {
+        const error: AppError = {
+          category: 'rule-execution-failed',
+          message: `Rule "${e.ruleId}" failed and was skipped.`,
+          timestamp: new Date().toISOString(),
+        }
+        if (e.diagnostic !== undefined) error.diagnostic = e.diagnostic
+        return error
+      }),
     truncated: result.truncatedWarnings.length > 0,
     healthScore: {
       score: result.score.finalScore,

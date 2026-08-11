@@ -6,6 +6,7 @@ import {
   cssEscape,
   intentionallyOffscreen,
   isDecorativeOverlay,
+  isPresentInAccessibilityTree,
   isScrollContainer,
   isVisible,
   issueFromElement,
@@ -688,24 +689,24 @@ export const smallTouchTargetRule: AnalysisRule = {
   },
 }
 
-export const inaccessibleControlRule: AnalysisRule = {
-  id: asRuleId('inaccessible-control'),
-  name: 'Inaccessible interactive control',
-  description: 'Unlabelled inputs, unnamed buttons, duplicate IDs, invalid ARIA refs.',
-  category: 'accessibility',
-  defaultSeverity: 'critical',
-  version: '1.2.0',
+export const duplicateIdRule: AnalysisRule = {
+  id: asRuleId('duplicate-id'),
+  name: 'Duplicate DOM ID',
+  description: 'Detects non-unique id attributes that break labels and ARIA references.',
+  category: 'structure',
+  defaultSeverity: 'warning',
+  version: '1.0.0',
   supports: requiresDom,
   getRecommendation: baseRec,
   evaluate(context) {
     return timed(context, () => {
       const doc = context.document
       const issues: RuleIssueData[] = []
-      let inspected = 0
-
       const idMap = new Map<string, Element[]>()
+      let inspected = 0
       for (const el of Array.from(doc.querySelectorAll('[id]'))) {
         inspected++
+        if (!el.id) continue
         const list = idMap.get(el.id) ?? []
         list.push(el)
         idMap.set(el.id, list)
@@ -716,7 +717,7 @@ export const inaccessibleControlRule: AnalysisRule = {
             issueFromElement(els[0], {
               severity: 'warning',
               title: 'Duplicate DOM ID',
-              explanation: `id="${id}" appears ${els.length} times.`,
+              explanation: `id="${id}" appears ${els.length} times. Duplicate ids break label associations and ARIA references.`,
               category: 'structure',
               confidence: 0.95,
               actual: { id, count: els.length },
@@ -727,31 +728,80 @@ export const inaccessibleControlRule: AnalysisRule = {
           )
         }
       }
+      return { issues, inspected }
+    })
+  },
+}
 
+export const invalidAriaRule: AnalysisRule = {
+  id: asRuleId('invalid-aria'),
+  name: 'Invalid ARIA reference',
+  description: 'Detects aria-labelledby / aria-describedby pointing at missing ids.',
+  category: 'accessibility',
+  defaultSeverity: 'warning',
+  version: '1.0.0',
+  supports: requiresDom,
+  getRecommendation: baseRec,
+  evaluate(context) {
+    return timed(context, () => {
+      const doc = context.document
+      const issues: RuleIssueData[] = []
+      let inspected = 0
+      const attrs = ['aria-labelledby', 'aria-describedby', 'aria-controls'] as const
+      for (const el of Array.from(doc.querySelectorAll(attrs.map((a) => `[${a}]`).join(',')))) {
+        inspected++
+        const style = computedStyle(doc, el)
+        if (!isPresentInAccessibilityTree(style)) continue
+        for (const attr of attrs) {
+          const value = el.getAttribute(attr)?.trim()
+          if (!value) continue
+          const missing = value.split(/\s+/).filter((id) => id && !doc.getElementById(id))
+          if (!missing.length) continue
+          issues.push(
+            issueFromElement(el, {
+              severity: 'warning',
+              title: 'Invalid ARIA reference',
+              explanation: `${attr} references missing id(s): ${missing.join(', ')}. This is a heuristic check, not WCAG certification.`,
+              category: 'accessibility',
+              confidence: 0.9,
+              actual: { attribute: attr, missing: missing.join(',') },
+              expected: { validRefs: true },
+              recommendation: 'Point ARIA references to existing element ids.',
+              measurementSignature: `aria-missing:${attr}:${missing.join(',')}`,
+              evidenceStyles: style ? styleEvidence(style, ['display', 'visibility']) : undefined,
+            }),
+          )
+        }
+      }
+      return { issues, inspected }
+    })
+  },
+}
+
+export const unlabelledControlRule: AnalysisRule = {
+  id: asRuleId('unlabelled-control'),
+  name: 'Unlabelled form control',
+  description: 'Detects visible inputs/selects/textareas without an accessible name.',
+  category: 'accessibility',
+  defaultSeverity: 'critical',
+  version: '1.0.0',
+  supports: requiresDom,
+  getRecommendation: baseRec,
+  evaluate(context) {
+    return timed(context, () => {
+      const doc = context.document
+      const issues: RuleIssueData[] = []
+      let inspected = 0
       for (const input of Array.from(doc.querySelectorAll('input, select, textarea')) as HTMLInputElement[]) {
         inspected++
-        if (input.type === 'hidden') continue
+        if (input.type === 'hidden' || input.type === 'submit' || input.type === 'button') continue
         const style = computedStyle(doc, input)
-        if (!style || !isVisible(input, style)) continue
+        if (!isPresentInAccessibilityTree(style)) continue
         let labelled = Boolean(input.getAttribute('aria-label')?.trim() || input.getAttribute('title')?.trim())
         const labelledBy = input.getAttribute('aria-labelledby')?.trim()
         if (labelledBy) {
-          const missing = labelledBy.split(/\s+/).filter((id) => id && !doc.getElementById(id))
-          if (missing.length) {
-            issues.push(
-              issueFromElement(input, {
-                severity: 'warning',
-                title: 'Invalid ARIA reference',
-                explanation: `aria-labelledby references missing id(s): ${missing.join(', ')}.`,
-                category: 'accessibility',
-                confidence: 0.9,
-                actual: { ariaLabelledBy: labelledBy, missing: missing.join(',') },
-                expected: { validRefs: true },
-                recommendation: 'Point ARIA references to existing element ids.',
-                measurementSignature: `aria-missing:${missing.join(',')}`,
-              }),
-            )
-          } else labelled = true
+          const ids = labelledBy.split(/\s+/).filter(Boolean)
+          if (ids.every((id) => doc.getElementById(id))) labelled = true
         }
         if (input.id && doc.querySelector(`label[for="${cssEscape(input.id)}"]`)) labelled = true
         if (input.closest('label')) labelled = true
@@ -760,22 +810,43 @@ export const inaccessibleControlRule: AnalysisRule = {
             issueFromElement(input, {
               severity: 'critical',
               title: 'Unlabelled form control',
-              explanation: 'Form control has no associated label or accessible name.',
+              explanation: 'Form control has no associated label or accessible name. Heuristic only — not WCAG certification.',
               category: 'accessibility',
               confidence: 0.9,
               actual: { accessibleName: '' },
               expected: { accessibleName: true },
               recommendation: 'Add a label, aria-label, or aria-labelledby.',
               measurementSignature: 'unlabelled-input',
+              evidenceStyles: style
+                ? styleEvidence(style, ['display', 'visibility', 'opacity'])
+                : undefined,
             }),
           )
         }
       }
+      return { issues, inspected }
+    })
+  },
+}
 
+export const inaccessibleControlRule: AnalysisRule = {
+  id: asRuleId('inaccessible-control'),
+  name: 'Inaccessible interactive control',
+  description: 'Detects buttons and role=button without an accessible name.',
+  category: 'accessibility',
+  defaultSeverity: 'critical',
+  version: '1.3.0',
+  supports: requiresDom,
+  getRecommendation: baseRec,
+  evaluate(context) {
+    return timed(context, () => {
+      const doc = context.document
+      const issues: RuleIssueData[] = []
+      let inspected = 0
       for (const button of Array.from(doc.querySelectorAll('button, [role="button"]'))) {
         inspected++
         const style = computedStyle(doc, button)
-        if (!style || !isVisible(button, style)) continue
+        if (!isPresentInAccessibilityTree(style)) continue
         const text = button.textContent?.trim() ?? ''
         const aria = button.getAttribute('aria-label')?.trim()
         if (!text && !aria) {
@@ -783,18 +854,20 @@ export const inaccessibleControlRule: AnalysisRule = {
             issueFromElement(button, {
               severity: 'critical',
               title: 'Unnamed button',
-              explanation: 'Button has no readable text or aria-label.',
+              explanation: 'Button has no readable text or aria-label. Heuristic only — not WCAG certification.',
               category: 'accessibility',
               confidence: 0.9,
               actual: { text: null, ariaLabel: null },
               expected: { accessibleName: true },
               recommendation: 'Provide visible text or an aria-label describing the action.',
               measurementSignature: 'unnamed-button',
+              evidenceStyles: style
+                ? styleEvidence(style, ['display', 'visibility', 'opacity'])
+                : undefined,
             }),
           )
         }
       }
-
       return { issues, inspected }
     })
   },
@@ -994,6 +1067,9 @@ export const BUILTIN_RULES: AnalysisRule[] = [
   fixedWidthRule,
   smallTouchTargetRule,
   inaccessibleControlRule,
+  duplicateIdRule,
+  invalidAriaRule,
+  unlabelledControlRule,
   stickyObstructionRule,
   unexpectedScrollbarRule,
   smallTextRule,

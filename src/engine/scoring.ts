@@ -1,3 +1,13 @@
+/**
+ * Presentation-facing scoring helpers.
+ * Business deductions live in domain/scoring/scorePolicy — this module adapts that policy
+ * to HealthScoreResult / sort helpers used by reports and UI display.
+ */
+import {
+  calculateScore,
+  scoreLabel as policyScoreLabel,
+  type IssueCategory,
+} from '../domain/scoring/scorePolicy'
 import type {
   GroupedIssue,
   HealthScoreResult,
@@ -5,76 +15,45 @@ import type {
   ScoreLabel,
 } from '../models/types'
 
-const CRITICAL_COST = 15
-const WARNING_COST = 5
-const INFO_COST = 1
-const MAX_DEDUCTION_PER_KEY = 20
-
 export function scoreLabel(score: number): ScoreLabel {
-  if (score >= 90) return 'Excellent'
-  if (score >= 75) return 'Good'
-  if (score >= 50) return 'Needs attention'
-  return 'Poor'
+  return policyScoreLabel(score)
 }
 
-function severityCost(severity: LayoutIssue['severity']): number {
-  if (severity === 'critical') return CRITICAL_COST
-  if (severity === 'warning') return WARNING_COST
-  return INFO_COST
+function toScoreable(issue: LayoutIssue) {
+  return {
+    ruleId: issue.ruleId,
+    selector: issue.selector,
+    severity: issue.severity,
+    confidence: issue.confidence,
+    category: (issue.category as IssueCategory | undefined) ?? 'structure',
+    lifecycle: issue.lifecycle,
+  }
 }
 
 /**
- * Layout Health Score 0–100.
- * Deduplicates by rule+selector so cross-viewport repeats do not stack unfairly.
- * Caps deduction per rule+element.
+ * Layout Health Score 0–100 via scoring policy v1.
+ * Deduplicates by rule+selector; confidence weighting + caps applied in domain policy.
  * Not a formal accessibility compliance score.
  */
 export function calculateHealthScore(issues: LayoutIssue[]): HealthScoreResult {
-  const active = issues.filter((i) => i.lifecycle === 'open' || !i.lifecycle)
-  const byKey = new Map<string, LayoutIssue>()
-
-  for (const issue of active) {
-    const key = `${issue.ruleId}::${issue.selector}`
-    const existing = byKey.get(key)
-    if (!existing) {
-      byKey.set(key, issue)
-      continue
-    }
-    // Keep highest severity for scoring
-    if (severityCost(issue.severity) > severityCost(existing.severity)) {
-      byKey.set(key, issue)
-    }
-  }
-
-  let score = 100
-  const deductions: HealthScoreResult['deductions'] = []
-
-  for (const issue of byKey.values()) {
-    const amount = Math.min(MAX_DEDUCTION_PER_KEY, severityCost(issue.severity))
-    score -= amount
-    deductions.push({
-      ruleId: issue.ruleId,
-      selector: issue.selector,
-      amount,
-      reason: `${issue.severity} · ${issue.title}`,
-    })
-  }
-
-  score = Math.max(0, Math.min(100, score))
-
+  const breakdown = calculateScore(issues.map(toScoreable))
   return {
-    score,
-    label: scoreLabel(score),
-    deductions,
-    criticalCount: active.filter((i) => i.severity === 'critical').length,
-    warningCount: active.filter((i) => i.severity === 'warning').length,
-    infoCount: active.filter((i) => i.severity === 'info').length,
+    score: breakdown.finalScore,
+    label: breakdown.label,
+    deductions: breakdown.lines.map((line) => ({
+      ruleId: line.ruleId,
+      selector: line.selector,
+      amount: line.cappedCost,
+      reason: line.reason,
+    })),
+    criticalCount: breakdown.criticalCount,
+    warningCount: breakdown.warningCount,
+    infoCount: breakdown.infoCount,
   }
 }
 
 export function calculateHealthScoreFromGrouped(grouped: GroupedIssue[]): HealthScoreResult {
-  const asIssues = grouped.map((g) => g.representative)
-  return calculateHealthScore(asIssues)
+  return calculateHealthScore(grouped.map((g) => g.representative))
 }
 
 export function sortIssuesBySeverityThenDom(issues: LayoutIssue[]): LayoutIssue[] {

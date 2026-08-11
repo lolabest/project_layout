@@ -66,7 +66,9 @@ export function issueFromElement(
   }
 }
 
-export function requiresDom(context: RuleContext): { applicable: boolean; reason?: string } {
+export function requiresDom(
+  context: RuleContext,
+): { applicable: boolean; reason?: string | undefined } {
   if (!context.capabilities.domInspectionAvailable) {
     return {
       applicable: false,
@@ -77,6 +79,21 @@ export function requiresDom(context: RuleContext): { applicable: boolean; reason
     return { applicable: false, reason: 'Document body is not available.' }
   }
   return { applicable: true }
+}
+
+/**
+ * Attribute/structure checks should not require a non-zero box
+ * (jsdom often reports 0×0; zero-size controls can still be a11y defects).
+ */
+export function isPresentInAccessibilityTree(
+  style: CSSStyleDeclaration | null,
+): boolean {
+  if (!style) return true
+  return !(
+    style.display === 'none' ||
+    style.visibility === 'hidden' ||
+    style.opacity === '0'
+  )
 }
 
 export function isScrollContainer(style: CSSStyleDeclaration): boolean {

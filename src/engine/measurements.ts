@@ -96,11 +96,13 @@ export function measureElement(element: Element): ElementMeasurements {
 
 export interface StyleEditSession {
   changes: TemporaryStyleChange[]
+  /** Undone changes available for redo (LIFO). */
+  redoStack: TemporaryStyleChange[]
   originals: Map<string, Map<string, string>>
 }
 
 export function createStyleEditSession(): StyleEditSession {
-  return { changes: [], originals: new Map() }
+  return { changes: [], redoStack: [], originals: new Map() }
 }
 
 export function applyTemporaryStyles(
@@ -130,6 +132,7 @@ export function applyTemporaryStyles(
         modifiedValue: value,
         appliedAt: new Date().toISOString(),
       })
+      session.redoStack = []
     }
     element.style.setProperty(prop, value)
   }
@@ -142,6 +145,11 @@ export function applyTemporaryStyles(
   }
 }
 
+function applyPropertyValue(el: HTMLElement, property: string, value: string): void {
+  if (value) el.style.setProperty(property, value)
+  else el.style.removeProperty(property)
+}
+
 export function undoLastChange(
   doc: Document,
   session: StyleEditSession,
@@ -150,22 +158,34 @@ export function undoLastChange(
   if (!last) return null
   try {
     const el = doc.querySelector(last.selector) as HTMLElement | null
-    if (!el) return last
-    // Find previous modified value for same property if any
-    const prior = [...session.changes].reverse().find(
-      (c) => c.selector === last.selector && c.property === last.property,
-    )
-    if (prior) {
-      el.style.setProperty(last.property, prior.modifiedValue)
-    } else {
-      const original = session.originals.get(last.selector)?.get(last.property) ?? ''
-      if (original) el.style.setProperty(last.property, original)
-      else el.style.removeProperty(last.property)
+    if (el) {
+      const prior = [...session.changes].reverse().find(
+        (c) => c.selector === last.selector && c.property === last.property,
+      )
+      if (prior) applyPropertyValue(el, last.property, prior.modifiedValue)
+      else applyPropertyValue(el, last.property, session.originals.get(last.selector)?.get(last.property) ?? '')
     }
   } catch {
-    /* ignore */
+    /* element may be gone — transaction still recorded as undone */
   }
+  session.redoStack.push(last)
   return last
+}
+
+export function redoLastChange(
+  doc: Document,
+  session: StyleEditSession,
+): TemporaryStyleChange | null {
+  const next = session.redoStack.pop()
+  if (!next) return null
+  try {
+    const el = doc.querySelector(next.selector) as HTMLElement | null
+    if (el) applyPropertyValue(el, next.property, next.modifiedValue)
+  } catch {
+    /* ignore missing element */
+  }
+  session.changes.push(next)
+  return next
 }
 
 export function resetElementStyles(
@@ -179,14 +199,14 @@ export function resetElementStyles(
     const el = doc.querySelector(selector) as HTMLElement | null
     if (el) {
       for (const [prop, value] of map) {
-        if (value) el.style.setProperty(prop, value)
-        else el.style.removeProperty(prop)
+        applyPropertyValue(el, prop, value)
       }
     }
   } catch {
     /* ignore */
   }
   session.changes = session.changes.filter((c) => c.selector !== selector)
+  session.redoStack = session.redoStack.filter((c) => c.selector !== selector)
   session.originals.delete(selector)
 }
 
@@ -195,6 +215,7 @@ export function resetAllStyles(doc: Document, session: StyleEditSession): void {
     resetElementStyles(doc, session, selector)
   }
   session.changes = []
+  session.redoStack = []
   session.originals.clear()
 }
 

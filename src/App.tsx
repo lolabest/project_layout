@@ -12,20 +12,12 @@ import { PreviewFrame, type PreviewFrameHandle } from './components/PreviewFrame
 import { ComparisonPanel } from './components/ComparisonPanel'
 import { countBySeverity } from './engine/analyzer'
 import {
-  applyTemporaryStyles,
   createStyleEditSession,
   measureElement,
-  resetAllStyles,
-  resetElementStyles,
-  undoLastChange,
   type StyleEditSession,
 } from './engine/measurements'
 import { captureIframeScreenshot } from './engine/screenshot'
-import {
-  buildViewportResult,
-  createSession,
-  loadSessions,
-} from './engine/reports'
+import { buildViewportResult, createSession } from './engine/reports'
 import { sourceDisplayName } from './engine/validation'
 import {
   beginSourceLoad,
@@ -39,10 +31,16 @@ import {
   countActiveIssues,
   markStaleIfMissing,
 } from './engine/issueLifecycle'
-import { calculateHealthScore, sortIssues, type IssueSortKey } from './engine/scoring'
+import { sortIssues, type IssueSortKey } from './engine/scoring'
 import { validateViewportDimensions } from './engine/viewportUtils'
 import { analysisApp } from './application/AnalysisApplicationService'
 import { diagnosticLogger } from './application/diagnostics'
+import {
+  ApplyTemporaryStyle,
+  RedoTemporaryStyle,
+  ResetTemporaryStyles,
+  UndoTemporaryStyle,
+} from './application/usecases'
 import type {
   ElementMeasurements,
   InspectionSettings,
@@ -203,9 +201,11 @@ export default function App() {
   const [issueDelta, setIssueDelta] = useState<IssueDelta | null>(null)
   const [scoreBefore, setScoreBefore] = useState<number | null>(null)
   const [scoreAfter, setScoreAfter] = useState<number | null>(null)
+  const [displayHealth, setDisplayHealth] = useState<{ score: number; label: string } | null>(null)
   const [diagnostics, setDiagnostics] = useState<string[]>([])
   const [sessionStatus, setSessionStatus] = useState<string>('Draft')
   const [canUndo, setCanUndo] = useState(false)
+  const [canRedo, setCanRedo] = useState(false)
 
   const [leftWidth, setLeftWidth] = useState(300)
   const [rightWidth, setRightWidth] = useState(360)
@@ -213,7 +213,7 @@ export default function App() {
   const [rightCollapsed, setRightCollapsed] = useState(false)
   const [sessions, setSessions] = useState<TestSession[]>(() => {
     const listed = analysisApp.listSessions()
-    return listed.ok ? listed.value : loadSessions()
+    return listed.ok ? listed.value : []
   })
   const [statusTone, setStatusTone] = useState<'info' | 'error' | 'warning' | 'success'>('info')
 
@@ -221,7 +221,6 @@ export default function App() {
     null,
   )
 
-  const health = calculateHealthScore(issues)
   const activeCount = countActiveIssues(issues)
   const sortedIssues = sortIssues(issues, sortKey)
 
@@ -309,6 +308,7 @@ export default function App() {
     selectedElementRef.current = null
     styleSessionRef.current = createStyleEditSession()
     setCanUndo(false)
+    setCanRedo(false)
     setLoadedKey((k) => k + 1)
     setStatusTone('info')
   }
@@ -378,11 +378,15 @@ export default function App() {
     setSessionStatus('Running')
     setStatusTone('info')
 
-    const { issues: nextIssues, diagnostics: diag, coverage } = await runAnalysisForDoc(doc, viewport)
+    const { issues: nextIssues, diagnostics: diag, coverage, health } = await runAnalysisForDoc(
+      doc,
+      viewport,
+    )
     setIssues(nextIssues)
     setDiagnostics(diag)
     setCoveragePercent(coverage?.percent ?? null)
     setCoverageWarning(coverage?.warning ?? null)
+    if (health) setDisplayHealth({ score: health.finalScore, label: health.label })
     setRightTab('issues')
     const counts = countBySeverity(nextIssues)
     setSourceCtrl((c) => ({
@@ -470,6 +474,10 @@ export default function App() {
 
     setMultiSummary(result.value.summary)
     setIssues(result.value.issues)
+    setDisplayHealth({
+      score: result.value.summary.overallHealthScore,
+      label: result.value.summary.scoreLabel,
+    })
     setCoveragePercent(null)
     setDiagnostics(diagnosticLogger.summary())
     setRightTab('results')
@@ -559,6 +567,16 @@ export default function App() {
     setIgnoredKeys(result.value.ignoredKeys)
   }
 
+  const onRestoreIssue = (issue: LayoutIssue) => {
+    const result = analysisApp.restoreIgnoredIssue(issues, issue.id)
+    if (!result.ok) {
+      setDiagnostics([result.error.message])
+      return
+    }
+    setIssues(result.value.issues)
+    setIgnoredKeys(result.value.ignoredKeys)
+  }
+
   const onSelectElement = (selector: string | null, element: Element | null) => {
     setSelectedSelector(selector)
     if (!element) {
@@ -571,23 +589,46 @@ export default function App() {
     setRightTab('element')
   }
 
+  const syncStyleFlags = () => {
+    setCanUndo(styleSessionRef.current.changes.length > 0)
+    setCanRedo(styleSessionRef.current.redoStack.length > 0)
+  }
+
   const reanalyzeAfterCss = async () => {
     const doc = previewRef.current?.getDocument()
     if (!doc || !canAnalyzeStrict(sourceCtrl.state, frameAccessible)) return
     const before = issues
-    const beforeScore = calculateHealthScore(before).score
+    const beforeScore = displayHealth?.score ?? null
     setScoreBefore(beforeScore)
-    const { issues: next } = await runAnalysisForDoc(doc, viewport)
+    const { issues: next, health } = await runAnalysisForDoc(doc, viewport)
     setIssues(next)
-    setIssueDelta(computeIssueDelta(before, next))
-    setScoreAfter(calculateHealthScore(next).score)
+    const delta = computeIssueDelta(before, next)
+    setIssueDelta(delta)
+    for (const resolved of delta.resolved) {
+      diagnosticLogger.log('issue_resolved', resolved.title, { ruleId: resolved.ruleId })
+    }
+    if (health) {
+      setDisplayHealth({ score: health.finalScore, label: health.label })
+      setScoreAfter(health.finalScore)
+    }
   }
 
   const onApplyStyles = (styles: Record<string, string>) => {
     const el = selectedElementRef.current
     if (!el) return
-    applyTemporaryStyles(el, styles, styleSessionRef.current)
-    setCanUndo(styleSessionRef.current.changes.length > 0)
+    const runtimeSessionId = analysisApp.getRuntime()?.sessionId
+    const applied = ApplyTemporaryStyle({
+      element: el,
+      styles,
+      session: styleSessionRef.current,
+      ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
+      viewportId: viewport.id,
+    })
+    if (!applied.ok) {
+      setDiagnostics([applied.error.message])
+      return
+    }
+    syncStyleFlags()
     setMeasurements(measureElement(el))
     setSourceCtrl((c) => ({
       ...c,
@@ -599,8 +640,19 @@ export default function App() {
   const onUndo = () => {
     const doc = previewRef.current?.getDocument()
     if (!doc) return
-    undoLastChange(doc, styleSessionRef.current)
-    setCanUndo(styleSessionRef.current.changes.length > 0)
+    const undone = UndoTemporaryStyle({ document: doc, session: styleSessionRef.current })
+    if (!undone.ok) return
+    syncStyleFlags()
+    if (selectedElementRef.current) setMeasurements(measureElement(selectedElementRef.current))
+    void reanalyzeAfterCss()
+  }
+
+  const onRedo = () => {
+    const doc = previewRef.current?.getDocument()
+    if (!doc) return
+    const redone = RedoTemporaryStyle({ document: doc, session: styleSessionRef.current })
+    if (!redone.ok) return
+    syncStyleFlags()
     if (selectedElementRef.current) setMeasurements(measureElement(selectedElementRef.current))
     void reanalyzeAfterCss()
   }
@@ -608,8 +660,12 @@ export default function App() {
   const onResetElement = () => {
     const doc = previewRef.current?.getDocument()
     if (!doc || !selectedSelector) return
-    resetElementStyles(doc, styleSessionRef.current, selectedSelector)
-    setCanUndo(styleSessionRef.current.changes.length > 0)
+    ResetTemporaryStyles({
+      document: doc,
+      session: styleSessionRef.current,
+      selector: selectedSelector,
+    })
+    syncStyleFlags()
     if (selectedElementRef.current) setMeasurements(measureElement(selectedElementRef.current))
     void reanalyzeAfterCss()
   }
@@ -617,8 +673,8 @@ export default function App() {
   const onResetAll = () => {
     const doc = previewRef.current?.getDocument()
     if (!doc) return
-    resetAllStyles(doc, styleSessionRef.current)
-    setCanUndo(false)
+    ResetTemporaryStyles({ document: doc, session: styleSessionRef.current })
+    syncStyleFlags()
     if (selectedElementRef.current) setMeasurements(measureElement(selectedElementRef.current))
     void reanalyzeAfterCss()
   }
@@ -648,7 +704,7 @@ export default function App() {
       results: multiSummary?.results ?? [buildViewportResult(viewport, issues, null, 'success')],
       ignoredIssueKeys: ignoredKeys,
       temporaryFixes: styleSessionRef.current.changes,
-      multiViewportSummary: multiSummary ?? undefined,
+      ...(multiSummary ? { multiViewportSummary: multiSummary } : {}),
       viewport,
       orientation,
       scale,
@@ -672,7 +728,7 @@ export default function App() {
       results: multiSummary?.results ?? [buildViewportResult(viewport, issues, null)],
       ignoredIssueKeys: ignoredKeys,
       temporaryFixes: styleSessionRef.current.changes,
-      multiViewportSummary: multiSummary ?? undefined,
+      ...(multiSummary ? { multiViewportSummary: multiSummary } : {}),
       viewport,
       orientation,
       scale,
@@ -701,6 +757,9 @@ export default function App() {
     setMultiSummary(session.multiViewportSummary ?? null)
     setIgnoredKeys(session.ignoredIssueKeys ?? {})
     setSessionStatus(session.status)
+    if (session.healthScore != null && session.scoreLabel) {
+      setDisplayHealth({ score: session.healthScore, label: session.scoreLabel })
+    }
     setLoadedKey((k) => k + 1)
     setSourceCtrl((c) => ({
       ...c,
@@ -771,8 +830,8 @@ export default function App() {
         analyzing={analyzing}
         hasPreview={previewReady || loadedKey > 0}
         canExport={sessionStatus === 'Completed' || sessionStatus === 'Completed with errors' || (issues.length > 0 && sessionStatus !== 'Running')}
-        healthScore={issues.length ? health.score : null}
-        scoreLabel={issues.length ? health.label : null}
+        healthScore={displayHealth?.score ?? null}
+        scoreLabel={displayHealth?.label ?? null}
       />
 
       <div className={workspaceClass} style={workspaceStyle}>
@@ -883,6 +942,7 @@ export default function App() {
             selectedIssueId={selectedIssueId}
             onSelectIssue={onSelectIssue}
             onIgnoreIssue={onIgnoreIssue}
+            onRestoreIssue={onRestoreIssue}
             severityFilter={severityFilter}
             typeFilter={typeFilter}
             lifecycleFilter={lifecycleFilter}
@@ -896,9 +956,11 @@ export default function App() {
             measurements={measurements}
             onApplyStyles={onApplyStyles}
             onUndo={onUndo}
+            onRedo={onRedo}
             onResetElement={onResetElement}
             onResetAll={onResetAll}
             canUndo={canUndo}
+            canRedo={canRedo}
             issueDelta={issueDelta}
             scoreBefore={scoreBefore}
             scoreAfter={scoreAfter}
@@ -907,8 +969,8 @@ export default function App() {
             onViewportFilter={setViewportFilter}
             analyzing={analyzing}
             progress={progress}
-            healthScore={issues.length ? health.score : null}
-            scoreLabel={issues.length ? health.label : null}
+            healthScore={displayHealth?.score ?? null}
+            scoreLabel={displayHealth?.label ?? null}
             activeIssueCount={activeCount}
             diagnostics={diagnostics}
           />

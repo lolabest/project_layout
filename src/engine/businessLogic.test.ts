@@ -95,8 +95,8 @@ describe('scoring and sorting', () => {
       issue({ ruleId: 'c', selector: '#c', severity: 'info', type: 'broken-link' }),
     ]
     const result = calculateHealthScore(issues)
-    // one critical (15) + warning (5) + info (1) = 79
-    expect(result.score).toBe(79)
+    // policy v1: confidence-weighted (0.9) → 15*0.9 + 5*0.9 + 1*0.9 = 18.9 → 81.1
+    expect(result.score).toBe(81.1)
     expect(scoreLabel(result.score)).toBe('Good')
   })
 

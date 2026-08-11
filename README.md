@@ -28,11 +28,11 @@ Layered design (see `ARCHITECTURE.md`):
 
 ```
 src/
-  domain/           State machines, Result/Error, scoring, fingerprint, coverage
-  application/      AnalysisApplicationService use cases + diagnostics
-  infrastructure/   LayoutRuleEngine, RuleRegistry, builtin rules, session repo
-  engine/           Shared helpers + compatibility facades
-  models/           UI-facing typed models
+  domain/           Entities, state machines, Result/Error, scoring, fingerprint, coverage
+  application/      Use cases + AnalysisApplicationService + diagnostics
+  infrastructure/   LayoutRuleEngine, RuleRegistry, 18 builtin rules, session repo
+  engine/           Stabilize, validation, reports, measurements (browser adapters)
+  models/           UI-facing DTOs
   components/       Presentation (no scoring/detection/persistence)
   App.tsx           Presentation wiring → application layer
 ```
@@ -41,26 +41,15 @@ Docs: `ARCHITECTURE.md`, `BUSINESS_LOGIC.md`, `RULES.md`, `SCORING.md`, `SECURIT
 
 ### Data flow
 
-1. User enters a URL or HTML/CSS → validation → iframe preview (`src` or sandboxed `srcdoc`).
-2. Same-origin documents are analyzed by `analyzeDocument()`.
-3. Issues appear in the right panel; clicking an issue highlights/scrolls to the element.
-4. Multi-viewport runs reuse the analyzer for each predefined size and capture screenshots when possible.
-5. Reports are generated in-memory and can be exported or stored in `localStorage`.
+1. User enters a URL or HTML/CSS → validation → fingerprint → iframe preview (`src` or sandboxed `srcdoc`).
+2. Same-origin documents are analyzed by `LayoutRuleEngine` via application use cases.
+3. Issues appear in the right panel with evidence; ignore/restore is fingerprint-scoped.
+4. Multi-viewport runs follow the viewport-run state machine and persist sessions (schema v2, max 20).
+5. Versioned JSON/HTML reports include coverage, score breakdown, and integrity hash.
 
 ## Supported checks
 
-| Check | Severity | Notes |
-| --- | --- | --- |
-| Horizontal overflow | Critical / Warning | Page scroll width and elements past the right edge |
-| Outside viewport | Warning | Fully off-screen positioned content |
-| Overlapping elements | Warning | Heuristic pairwise overlap for visible candidates |
-| Text clipping | Warning | Overflow hidden / ellipsis with scroll overflow |
-| Images exceeding containers | Warning | Image box wider than parent |
-| Missing `alt` | Critical | `<img>` without an `alt` attribute |
-| Broken images | Critical | Loaded images with zero natural dimensions |
-| Broken / placeholder links | Info / Warning | Empty, `#`, or `javascript:` hrefs |
-| Fixed widths | Warning | Large px widths that may break small viewports |
-| Small touch targets | Warning | Interactive controls under ~44×44px |
+18 configurable rules (see `RULES.md`): overflow, outside viewport, spatial overlap, text clipping, image overflow/broken/alt/layout-shift, unsafe links, fixed widths, touch targets, unnamed buttons, duplicate IDs, invalid ARIA, unlabelled controls, sticky obstruction, unexpected scrollbars, small text.
 
 ## UI overview
 

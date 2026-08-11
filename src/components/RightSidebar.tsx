@@ -22,6 +22,7 @@ interface RightSidebarProps {
   selectedIssueId: string | null
   onSelectIssue: (issue: LayoutIssue) => void
   onIgnoreIssue: (issue: LayoutIssue) => void
+  onRestoreIssue: (issue: LayoutIssue) => void
   severityFilter: Severity | 'all'
   typeFilter: IssueType | 'all'
   lifecycleFilter: IssueLifecycle | 'all'
@@ -35,9 +36,11 @@ interface RightSidebarProps {
   measurements: ElementMeasurements | null
   onApplyStyles: (styles: Record<string, string>) => void
   onUndo: () => void
+  onRedo: () => void
   onResetElement: () => void
   onResetAll: () => void
   canUndo: boolean
+  canRedo: boolean
   issueDelta: IssueDelta | null
   scoreBefore: number | null
   scoreAfter: number | null
@@ -222,6 +225,15 @@ export function RightSidebar(props: RightSidebarProps) {
                       Ignore
                     </button>
                   )}
+                  {issue.lifecycle === 'ignored' && (
+                    <button
+                      type="button"
+                      className={styles.ignoreBtn}
+                      onClick={() => props.onRestoreIssue(issue)}
+                    >
+                      Restore
+                    </button>
+                  )}
                   {issue.lifecycle === 'stale' && (
                     <div className={styles.staleNote}>
                       Element no longer found — rerun analysis to refresh.
@@ -249,9 +261,11 @@ export function RightSidebar(props: RightSidebarProps) {
             measurements={props.measurements}
             onApplyStyles={props.onApplyStyles}
             onUndo={props.onUndo}
+            onRedo={props.onRedo}
             onResetElement={props.onResetElement}
             onResetAll={props.onResetAll}
             canUndo={props.canUndo}
+            canRedo={props.canRedo}
             issueDelta={props.issueDelta}
             scoreBefore={props.scoreBefore}
             scoreAfter={props.scoreAfter}

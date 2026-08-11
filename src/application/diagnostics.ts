@@ -15,11 +15,11 @@ export type DiagnosticEventType =
 export interface DiagnosticEvent {
   type: DiagnosticEventType
   timestamp: string
-  sessionId?: string
-  viewportId?: string
-  ruleId?: string
+  sessionId?: string | undefined
+  viewportId?: string | undefined
+  ruleId?: string | undefined
   message: string
-  data?: Record<string, string | number | boolean | null>
+  data?: Record<string, string | number | boolean | null> | undefined
 }
 
 /** In-memory diagnostic logger — replaceable by a telemetry adapter later. */

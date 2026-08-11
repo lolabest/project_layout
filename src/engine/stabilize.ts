@@ -4,6 +4,14 @@ export interface StabilizeOptions {
   signal?: AbortSignal
 }
 
+export interface StabilizationMetadata {
+  timedOut: boolean
+  durationMs: number
+  fontStatus: 'ready' | 'timeout' | 'unavailable'
+  imageStatus: 'ready' | 'timeout' | 'none'
+  mutationCount: number
+}
+
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -31,20 +39,34 @@ function doubleRaf(doc: Document): Promise<void> {
   })
 }
 
-async function waitForFonts(doc: Document, signal?: AbortSignal): Promise<void> {
+async function waitForFonts(
+  doc: Document,
+  signal?: AbortSignal,
+): Promise<'ready' | 'timeout' | 'unavailable'> {
   const fonts = doc.fonts
-  if (!fonts?.ready) return
+  if (!fonts?.ready) return 'unavailable'
+  let timedOut = false
   await Promise.race([
     fonts.ready.then(() => undefined),
-    wait(1500, signal).catch(() => undefined),
+    wait(1500, signal)
+      .then(() => {
+        timedOut = true
+      })
+      .catch(() => undefined),
   ])
+  return timedOut ? 'timeout' : 'ready'
 }
 
-async function waitForImages(doc: Document, signal?: AbortSignal): Promise<void> {
+async function waitForImages(
+  doc: Document,
+  signal?: AbortSignal,
+): Promise<'ready' | 'timeout' | 'none'> {
   const images = Array.from(doc.images)
   const pending = images.filter((img) => !img.complete)
-  if (pending.length === 0) return
+  if (images.length === 0) return 'none'
+  if (pending.length === 0) return 'ready'
 
+  let timedOut = false
   await Promise.race([
     Promise.all(
       pending.map(
@@ -56,8 +78,13 @@ async function waitForImages(doc: Document, signal?: AbortSignal): Promise<void>
           }),
       ),
     ),
-    wait(2500, signal).catch(() => undefined),
+    wait(2500, signal)
+      .then(() => {
+        timedOut = true
+      })
+      .catch(() => undefined),
   ])
+  return timedOut ? 'timeout' : 'ready'
 }
 
 /**
@@ -67,11 +94,14 @@ async function waitForImages(doc: Document, signal?: AbortSignal): Promise<void>
 export async function waitForLayoutStabilization(
   doc: Document,
   options: StabilizeOptions = {},
-): Promise<{ timedOut: boolean }> {
+): Promise<StabilizationMetadata> {
   const timeoutMs = options.timeoutMs ?? 5000
   const quietMs = options.quietMs ?? 80
   const signal = options.signal
   const started = Date.now()
+  let mutationCount = 0
+  let fontStatus: StabilizationMetadata['fontStatus'] = 'unavailable'
+  let imageStatus: StabilizationMetadata['imageStatus'] = 'none'
 
   const run = async () => {
     if (doc.readyState !== 'complete') {
@@ -85,10 +115,33 @@ export async function waitForLayoutStabilization(
       })
     }
 
-    await waitForFonts(doc, signal)
-    await waitForImages(doc, signal)
+    fontStatus = await waitForFonts(doc, signal)
+    imageStatus = await waitForImages(doc, signal)
     await doubleRaf(doc)
-    await wait(quietMs, signal)
+
+    const root = doc.documentElement
+    const observer = new MutationObserver((records) => {
+      mutationCount += records.length
+    })
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    })
+    try {
+      await wait(quietMs, signal)
+      // Second quiet window if mutations occurred
+      if (mutationCount > 0) {
+        const before = mutationCount
+        await wait(quietMs, signal)
+        if (mutationCount > before) {
+          await wait(quietMs, signal)
+        }
+      }
+    } finally {
+      observer.disconnect()
+    }
   }
 
   try {
@@ -98,10 +151,22 @@ export async function waitForLayoutStabilization(
         throw new Error('stabilization-timeout')
       }),
     ])
-    return { timedOut: false }
+    return {
+      timedOut: false,
+      durationMs: Date.now() - started,
+      fontStatus,
+      imageStatus,
+      mutationCount,
+    }
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
-    return { timedOut: Date.now() - started >= timeoutMs - 10 }
+    return {
+      timedOut: true,
+      durationMs: Date.now() - started,
+      fontStatus,
+      imageStatus,
+      mutationCount,
+    }
   }
 }
 

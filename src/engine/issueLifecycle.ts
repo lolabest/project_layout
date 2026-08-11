@@ -1,3 +1,4 @@
+import { buildIgnoredIdentityKey } from '../domain/issueIdentity'
 import type {
   GroupedIssue,
   IssueLifecycle,
@@ -6,18 +7,36 @@ import type {
 } from '../models/types'
 import { buildCrossViewportKey } from './selectors'
 
+function ignoreLookupKeys(issue: LayoutIssue): string[] {
+  const keys = [
+    buildCrossViewportKey(issue.ruleId, issue.selector),
+    issue.issueKey,
+  ]
+  if (issue.sourceFingerprint) {
+    keys.push(
+      buildIgnoredIdentityKey({
+        fingerprint: issue.sourceFingerprint,
+        ruleId: issue.ruleId,
+        selector: issue.selector,
+      }),
+    )
+  }
+  return keys
+}
+
 export function applyIgnoredState(
   issues: LayoutIssue[],
   ignoredKeys: Record<string, string> | undefined,
 ): LayoutIssue[] {
   if (!ignoredKeys || Object.keys(ignoredKeys).length === 0) return issues
   return issues.map((issue) => {
-    const crossKey = buildCrossViewportKey(issue.ruleId, issue.selector)
-    if (ignoredKeys[crossKey] !== undefined || ignoredKeys[issue.issueKey] !== undefined) {
-      return {
-        ...issue,
-        lifecycle: 'ignored' as IssueLifecycle,
-        ignoreReason: ignoredKeys[crossKey] ?? ignoredKeys[issue.issueKey],
+    for (const key of ignoreLookupKeys(issue)) {
+      if (ignoredKeys[key] !== undefined) {
+        return {
+          ...issue,
+          lifecycle: 'ignored' as IssueLifecycle,
+          ignoreReason: ignoredKeys[key],
+        }
       }
     }
     return issue
@@ -28,12 +47,19 @@ export function ignoreIssue(
   issues: LayoutIssue[],
   issueId: string,
   reason = '',
+  fingerprint?: string,
 ): { issues: LayoutIssue[]; ignoredKeys: Record<string, string> } {
   const ignoredKeys: Record<string, string> = {}
   const next = issues.map((issue) => {
     if (issue.id !== issueId) return issue
-    const crossKey = buildCrossViewportKey(issue.ruleId, issue.selector)
-    ignoredKeys[crossKey] = reason
+    const fp = fingerprint ?? issue.sourceFingerprint ?? ''
+    const scoped = buildIgnoredIdentityKey({
+      fingerprint: fp,
+      ruleId: issue.ruleId,
+      selector: issue.selector,
+    })
+    ignoredKeys[scoped] = reason
+    ignoredKeys[buildCrossViewportKey(issue.ruleId, issue.selector)] = reason
     return { ...issue, lifecycle: 'ignored' as IssueLifecycle, ignoreReason: reason }
   })
   return { issues: next, ignoredKeys }

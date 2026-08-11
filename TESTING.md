@@ -9,27 +9,23 @@ npm run lint
 npm run build
 ```
 
-## Suites
+## Unit coverage
 
-| Area | Location |
-| --- | --- |
-| State machines (allowed + rejected) | `src/domain/states/stateMachines.test.ts` |
-| Score / coverage / fingerprints | `src/domain/scoring/scorePolicy.test.ts` |
-| Rules + validation + reports | `src/engine/analyzer.test.ts`, `businessLogic.test.ts` |
-| Integration flows | `src/engine/integration.test.ts` |
+- State machines: every allowed/rejected transition (`src/domain/states/stateMachines.test.ts`)
+- Source fingerprinting (`fingerprint` tests via businessLogic)
+- Issue identity / ignore scoping (`src/domain/issueIdentity.test.ts`)
+- Score policy (`src/domain/scoring/scorePolicy.test.ts`)
+- Builtin rules including split a11y rules (`src/infrastructure/rules/builtinRules.test.ts`)
+- Temporary CSS undo/redo (`src/engine/measurements.test.ts`)
+- Session repository migration/corruption/max-20 (`src/infrastructure/persistence/sessionRepository.test.ts`)
+- Use cases (`src/application/usecases/usecases.test.ts`)
+- Report integrity hash (`src/engine/reports.integrity.test.ts`)
+- Analyzer / businessLogic / integration fixtures (deterministic DOM, no public websites)
 
-## Fixtures
+## Integration
 
-Automated tests use **deterministic local HTML fixtures** via `DOMParser` / `buildSrcDoc`.  
-They do **not** depend on public websites.
+`src/engine/integration.test.ts` covers analysis session flows, export, and persistence facades with local fixtures.
 
-## Rule tests cover
+## Strictness
 
-- valid layout paths  
-- broken layout detection  
-- intentional exclusions (e.g. `alt=""`, ellipsis as Info)  
-- boundary / hidden / zero-size protections where implemented  
-
-## Manual checks
-
-Use the sample markup in the app: Load Preview → Analyze Layout → Run All Viewports → Compare → Export.
+TypeScript enables: `strict`, `noImplicitAny`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noFallthroughCasesInSwitch`, `noImplicitReturns`.

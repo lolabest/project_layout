@@ -1,5 +1,6 @@
 import { Errors, type AppError } from '../domain/errors'
 import { fingerprintSource } from '../domain/fingerprint'
+import { buildIgnoredIdentityKey } from '../domain/issueIdentity'
 import { err, ok, type Result } from '../domain/result'
 import {
   fromUiSessionStatus,
@@ -15,6 +16,10 @@ import {
   type SourceLifecycleState,
 } from '../domain/states/sourceStateMachine'
 import { transitionIssue } from '../domain/states/issueStateMachine'
+import {
+  transitionViewportRun,
+  type ViewportRunState,
+} from '../domain/states/viewportRunStateMachine'
 import { capabilitiesFromPreview, describeCapabilities } from '../domain/capabilities'
 import { calculateCoverage } from '../domain/coverage'
 import { asSessionId, createId } from '../domain/ids'
@@ -35,7 +40,7 @@ import {
   sessionRepository,
   type SessionRepository,
 } from '../infrastructure/persistence/LocalStorageSessionRepository'
-import { diagnosticLogger, type DiagnosticLogger } from './diagnostics'
+import { diagnosticLogger, type DiagnosticEventType, type DiagnosticLogger } from './diagnostics'
 import type {
   LayoutIssue,
   PreviewSource,
@@ -46,6 +51,7 @@ import { PREDEFINED_VIEWPORTS } from '../models/types'
 import { applyIgnoredState, groupIssuesAcrossViewports } from '../engine/issueLifecycle'
 import { SCORING_POLICY_VERSION } from '../domain/scoring/scorePolicy'
 import { RULE_ENGINE_VERSION } from '../infrastructure/rules/LayoutRuleEngine'
+import { buildCrossViewportKey } from '../engine/selectors'
 
 export interface AnalysisConfigSnapshot {
   enabledRuleIds: string[]
@@ -53,6 +59,9 @@ export interface AnalysisConfigSnapshot {
   scoringPolicyVersion: string
   maxElements: number
   maxOverlapCandidates: number
+  maxIssuesPerRule: number
+  ruleTimeoutMs: number
+  viewportTimeoutMs: number
 }
 
 export interface ActiveSessionRuntime {
@@ -64,6 +73,15 @@ export interface ActiveSessionRuntime {
   config: AnalysisConfigSnapshot
   ignoredKeys: Record<string, string>
   controller: AbortController | null
+  viewportRunState: ViewportRunState
+}
+
+function mustTransitionViewport(
+  from: ViewportRunState,
+  to: ViewportRunState,
+): ViewportRunState {
+  const result = transitionViewportRun(from, to)
+  return result.ok ? result.value : from
 }
 
 export class AnalysisApplicationService {
@@ -80,6 +98,16 @@ export class AnalysisApplicationService {
     this.repo = repo
     this.diagnostics = diagnostics
     this.engine = engine
+    this.engine.setDiagnostics({
+      log: (type, message, meta) => {
+        this.diagnostics.log(type as DiagnosticEventType, message, {
+          ...(meta?.sessionId ? { sessionId: meta.sessionId } : {}),
+          ...(meta?.ruleId ? { ruleId: meta.ruleId } : {}),
+          ...(meta?.viewportId ? { viewportId: meta.viewportId } : {}),
+          ...(meta?.detail ? { data: { detail: meta.detail } } : {}),
+        })
+      },
+    })
   }
 
   getRuntime(): ActiveSessionRuntime | null {
@@ -96,7 +124,7 @@ export class AnalysisApplicationService {
   }
 
   createAnalysisSession(source: PreviewSource, viewports: ViewportSize[] = PREDEFINED_VIEWPORTS): Result<TestSession, AppError> {
-    if (this.runtime && !isSessionTerminal(this.runtime.state)) {
+    if (this.runtime && !isSessionTerminal(this.runtime.state) && this.runtime.state === 'Running') {
       return err(Errors.sessionConflict(`Session ${this.runtime.sessionId} is ${this.runtime.state}`))
     }
     const validated = this.validateSource(source)
@@ -108,6 +136,9 @@ export class AnalysisApplicationService {
       scoringPolicyVersion: SCORING_POLICY_VERSION,
       maxElements: 500,
       maxOverlapCandidates: 120,
+      maxIssuesPerRule: 40,
+      ruleTimeoutMs: 2000,
+      viewportTimeoutMs: 15000,
     }
 
     const session = createSession({
@@ -127,6 +158,7 @@ export class AnalysisApplicationService {
       config,
       ignoredKeys: {},
       controller: null,
+      viewportRunState: 'Pending',
     }
     this.diagnostics.log('session_created', `Session ${session.id} created`, {
       sessionId: session.id,
@@ -148,9 +180,13 @@ export class AnalysisApplicationService {
           scoringPolicyVersion: SCORING_POLICY_VERSION,
           maxElements: 500,
           maxOverlapCandidates: 120,
+          maxIssuesPerRule: 40,
+          ruleTimeoutMs: 2000,
+          viewportTimeoutMs: 15000,
         },
         ignoredKeys: {},
         controller: null,
+        viewportRunState: 'Pending',
       }
     }
     const result = transitionSource(this.runtime.sourceState, to)
@@ -169,17 +205,33 @@ export class AnalysisApplicationService {
 
   cancelAnalysisSession(): Result<{ state: SessionLifecycleState }, AppError> {
     if (!this.runtime) return err(Errors.sessionConflict('No active session'))
-    const toCancelling = transitionSession(this.runtime.state, 'Cancelling')
-    if (!toCancelling.ok) {
-      // Allow cancel from Draft quietly
-      if (this.runtime.state === 'Draft') {
-        this.runtime.state = 'Cancelled'
-        return ok({ state: 'Cancelled' })
-      }
-      return toCancelling
+    if (this.runtime.state === 'Draft') {
+      this.runtime.state = 'Cancelled'
+      this.runtime.viewportRunState = 'Cancelled'
+      return ok({ state: 'Cancelled' })
     }
+    const toCancelling = transitionSession(this.runtime.state, 'Cancelling')
+    if (!toCancelling.ok) return toCancelling
     this.runtime.state = 'Cancelling'
     this.runtime.controller?.abort()
+    this.runtime.viewportRunState = mustTransitionViewport(
+      this.runtime.viewportRunState === 'Completed' ||
+        this.runtime.viewportRunState === 'Failed' ||
+        this.runtime.viewportRunState === 'Skipped' ||
+        this.runtime.viewportRunState === 'Cancelled'
+        ? 'Pending'
+        : this.runtime.viewportRunState,
+      'Cancelled',
+    )
+    // If already terminal viewport state, force Cancelled for bookkeeping
+    if (
+      this.runtime.viewportRunState !== 'Cancelled' &&
+      transitionViewportRun(this.runtime.viewportRunState, 'Cancelled').ok
+    ) {
+      this.runtime.viewportRunState = 'Cancelled'
+    } else if (this.runtime.viewportRunState !== 'Cancelled') {
+      this.runtime.viewportRunState = 'Cancelled'
+    }
     const cancelled = transitionSession(this.runtime.state, 'Cancelled')
     if (cancelled.ok) this.runtime.state = cancelled.value
     this.diagnostics.log('analysis_cancelled', 'Analysis cancelled', {
@@ -188,21 +240,36 @@ export class AnalysisApplicationService {
     return ok({ state: this.runtime.state })
   }
 
+  private beginSessionRunning(): Result<void, AppError> {
+    if (!this.runtime) return err(Errors.sessionConflict('No active session'))
+    if (this.runtime.state === 'Running') {
+      return err(Errors.sessionConflict('Analysis already running'))
+    }
+    if (isSessionTerminal(this.runtime.state)) {
+      // Rerun / new work creates a fresh non-terminal Draft→Running path
+      this.runtime.state = 'Draft'
+    }
+    if (this.runtime.state === 'Draft' || this.runtime.state === 'Queued') {
+      const t = transitionSession(this.runtime.state, 'Running')
+      if (!t.ok) return t
+      this.runtime.state = t.value
+      return ok(undefined)
+    }
+    return err(Errors.sessionConflict(`Cannot start from ${this.runtime.state}`))
+  }
+
   async runActiveViewportAnalysis(input: {
     document: Document | null
     viewport: ViewportSize
     preview: { loaded: boolean; blocked: boolean; accessible: boolean }
-    ignoredKeys?: Record<string, string>
+    ignoredKeys?: Record<string, string> | undefined
   }): Promise<Result<{
     issues: LayoutIssue[]
     engine: EngineAnalysisResult
     capabilitiesMessage: string
     sessionStatus: string
+    viewportRunState: ViewportRunState
   }, AppError>> {
-    if (this.runtime && !isSessionTerminal(this.runtime.state) && this.runtime.state === 'Running') {
-      return err(Errors.sessionConflict('Analysis already running'))
-    }
-
     const caps = capabilitiesFromPreview(input.preview)
     if (!caps.domInspectionAvailable || !input.document) {
       return err(
@@ -220,19 +287,11 @@ export class AnalysisApplicationService {
       if (!created.ok) return created
     }
 
-    const start = transitionSession(this.runtime!.state === 'Draft' ? 'Draft' : 'Draft', 'Running')
-    // Force runtime to Running from Draft/Queued
-    if (this.runtime!.state === 'Draft' || this.runtime!.state === 'Queued') {
-      const t = transitionSession(this.runtime!.state, 'Running')
-      if (!t.ok) return t
-      this.runtime!.state = t.value
-    } else if (isSessionTerminal(this.runtime!.state)) {
-      this.runtime!.state = 'Running'
-    } else if (this.runtime!.state !== 'Running') {
-      if (!start.ok) {
-        this.runtime!.state = 'Running'
-      }
-    }
+    const started = this.beginSessionRunning()
+    if (!started.ok) return started
+
+    this.runtime!.viewportRunState = 'Pending'
+    this.runtime!.viewportRunState = mustTransitionViewport(this.runtime!.viewportRunState, 'Preparing')
 
     const controller = new AbortController()
     this.runtime!.controller = controller
@@ -241,15 +300,37 @@ export class AnalysisApplicationService {
       viewportId: input.viewport.id,
     })
 
+    const viewportTimeout = window.setTimeout(() => {
+      controller.abort()
+    }, this.runtime!.config.viewportTimeoutMs)
+
     try {
+      this.runtime!.viewportRunState = mustTransitionViewport(
+        this.runtime!.viewportRunState,
+        'Stabilising',
+      )
       const stable = await waitForLayoutStabilization(input.document, {
         signal: controller.signal,
         timeoutMs: 5000,
       })
-      this.diagnostics.log('viewport_stabilised', stable.timedOut ? 'Stabilisation timed out' : 'Stabilised', {
-        sessionId: this.runtime!.sessionId,
-        viewportId: input.viewport.id,
-      })
+      this.diagnostics.log(
+        'viewport_stabilised',
+        stable.timedOut ? 'Stabilisation timed out' : 'Stabilised',
+        {
+          sessionId: this.runtime!.sessionId,
+          viewportId: input.viewport.id,
+          data: {
+            durationMs: stable.durationMs,
+            mutationCount: stable.mutationCount,
+            timedOut: stable.timedOut,
+          },
+        },
+      )
+
+      this.runtime!.viewportRunState = mustTransitionViewport(
+        this.runtime!.viewportRunState,
+        'Analysing',
+      )
 
       const engineResult = this.engine.analyze({
         document: input.document,
@@ -257,9 +338,12 @@ export class AnalysisApplicationService {
         sourceFingerprint: this.runtime!.fingerprint || 'unknown',
         capabilities: caps,
         signal: controller.signal,
+        sessionId: this.runtime!.sessionId,
         limits: {
           maxElements: this.runtime!.config.maxElements,
           maxOverlapCandidates: this.runtime!.config.maxOverlapCandidates,
+          maxIssuesPerRule: this.runtime!.config.maxIssuesPerRule,
+          ruleTimeoutMs: this.runtime!.config.ruleTimeoutMs,
         },
       })
 
@@ -272,15 +356,26 @@ export class AnalysisApplicationService {
           domAccessible: true,
           stabilizationTimedOut: true,
         })
+        engineResult.truncatedWarnings.push(
+          'DOM stabilization timed out — analysis continued with a coverage penalty.',
+        )
       }
 
-      const ignored = applyIgnoredState(engineResult.issues, input.ignoredKeys ?? this.runtime!.ignoredKeys)
-      for (const issue of ignored) {
+      const ignored = applyIgnoredState(
+        engineResult.issues,
+        input.ignoredKeys ?? this.runtime!.ignoredKeys,
+      )
+      for (const issue of ignored.filter((i) => i.lifecycle === 'open')) {
         this.diagnostics.log('issue_detected', issue.title, {
           sessionId: this.runtime!.sessionId,
           ruleId: issue.ruleId,
         })
       }
+
+      this.runtime!.viewportRunState = mustTransitionViewport(
+        this.runtime!.viewportRunState,
+        'Completed',
+      )
 
       const completed = transitionSession(this.runtime!.state, 'Completed')
       if (completed.ok) this.runtime!.state = completed.value
@@ -291,19 +386,46 @@ export class AnalysisApplicationService {
         engine: { ...engineResult, issues: ignored },
         capabilitiesMessage: describeCapabilities(caps),
         sessionStatus: toUiSessionStatus(this.runtime!.state),
+        viewportRunState: this.runtime!.viewportRunState,
       })
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         this.runtime!.state = 'Cancelled'
+        this.runtime!.viewportRunState = 'Cancelled'
         return err(Errors.cancelled())
       }
       this.runtime!.state = 'Failed'
+      this.runtime!.viewportRunState = mustTransitionViewport(
+        this.runtime!.viewportRunState,
+        'Failed',
+      )
       return err(
         Errors.analysisTimeout(error instanceof Error ? error.message : 'Analysis failed'),
       )
     } finally {
+      window.clearTimeout(viewportTimeout)
       this.runtime!.controller = null
     }
+  }
+
+  /** Rerun against the same source fingerprint / ignored-key scope. */
+  async rerunAnalysis(input: {
+    document: Document | null
+    viewport: ViewportSize
+    preview: { loaded: boolean; blocked: boolean; accessible: boolean }
+    ignoredKeys?: Record<string, string> | undefined
+  }): Promise<Result<{
+    issues: LayoutIssue[]
+    engine: EngineAnalysisResult
+    capabilitiesMessage: string
+    sessionStatus: string
+    viewportRunState: ViewportRunState
+  }, AppError>> {
+    if (this.runtime && isSessionTerminal(this.runtime.state)) {
+      this.runtime.state = 'Draft'
+      this.runtime.viewportRunState = 'Pending'
+    }
+    return this.runActiveViewportAnalysis(input)
   }
 
   async runAllViewportsAnalysis(input: {
@@ -312,7 +434,7 @@ export class AnalysisApplicationService {
     reloadPreview: () => Promise<void>
     preview: { loaded: boolean; blocked: boolean; accessible: boolean }
     source: PreviewSource
-    ignoredKeys?: Record<string, string>
+    ignoredKeys?: Record<string, string> | undefined
     captureScreenshot: () => Promise<string | null>
   }): Promise<Result<{
     summary: ReturnType<typeof summarizeMultiViewport>
@@ -345,13 +467,14 @@ export class AnalysisApplicationService {
           results.push(buildViewportResult(vp, [], null, 'failed', 'Inspection unavailable'))
           continue
         }
+        // Nested single-viewport analysis — temporarily release Running guard
+        this.runtime!.state = 'Draft'
         const single = await this.runActiveViewportAnalysis({
           document: doc,
           viewport: vp,
           preview: input.preview,
-          ignoredKeys: input.ignoredKeys,
+          ...(input.ignoredKeys ? { ignoredKeys: input.ignoredKeys } : {}),
         })
-        // runActiveViewportAnalysis sets state Completed — keep Running for multi
         this.runtime!.state = 'Running'
         this.runtime!.controller = controller
         if (!single.ok) {
@@ -371,8 +494,7 @@ export class AnalysisApplicationService {
       this.runtime!.state = fromUiSessionStatus(status)
       const summary = summarizeMultiViewport(sourceDisplayName(input.source), results)
       const issues = results.flatMap((r) => r.issues)
-      const grouped = groupIssuesAcrossViewports(issues, PREDEFINED_VIEWPORTS)
-      void grouped
+      void groupIssuesAcrossViewports(issues, PREDEFINED_VIEWPORTS)
       const session = createSession({
         name: sourceDisplayName(input.source),
         source: input.source,
@@ -385,11 +507,18 @@ export class AnalysisApplicationService {
         report: createReport({
           sourceName: sourceDisplayName(input.source),
           sourceMode: input.source.mode,
-          sourceUrl: input.source.mode === 'url' ? input.source.url : undefined,
+          ...(input.source.mode === 'url' ? { sourceUrl: input.source.url } : {}),
           viewport: PREDEFINED_VIEWPORTS[0]!,
           viewports: PREDEFINED_VIEWPORTS,
           issues,
           screenshots: results.map((r) => r.screenshotDataUrl).filter(Boolean) as string[],
+          sessionId: this.runtime!.sessionId,
+          sourceFingerprint: this.runtime!.fingerprint,
+          analysisConfiguration: {
+            maxElements: this.runtime!.config.maxElements,
+            maxOverlapCandidates: this.runtime!.config.maxOverlapCandidates,
+            ruleTimeoutMs: this.runtime!.config.ruleTimeoutMs,
+          },
         }),
       })
       this.repo.save(session)
@@ -412,12 +541,19 @@ export class AnalysisApplicationService {
     issueId: string,
     reason: string,
   ): Result<{ issues: LayoutIssue[]; ignoredKeys: Record<string, string> }, AppError> {
+    const fingerprint = this.runtime?.fingerprint ?? ''
     const ignoredKeys: Record<string, string> = { ...(this.runtime?.ignoredKeys ?? {}) }
     const next = issues.map((issue) => {
       if (issue.id !== issueId) return issue
       const transitioned = transitionIssue('Open', 'Ignored')
       if (!transitioned.ok) return issue
-      ignoredKeys[`${issue.ruleId}::${issue.selector}`] = reason
+      const scoped = buildIgnoredIdentityKey({
+        fingerprint: fingerprint || issue.sourceFingerprint || '',
+        ruleId: issue.ruleId,
+        selector: issue.selector,
+      })
+      ignoredKeys[scoped] = reason
+      ignoredKeys[buildCrossViewportKey(issue.ruleId, issue.selector)] = reason
       return { ...issue, lifecycle: 'ignored' as const, ignoreReason: reason }
     })
     if (this.runtime) this.runtime.ignoredKeys = ignoredKeys
@@ -428,11 +564,23 @@ export class AnalysisApplicationService {
     issues: LayoutIssue[],
     issueId: string,
   ): Result<{ issues: LayoutIssue[]; ignoredKeys: Record<string, string> }, AppError> {
+    const fingerprint = this.runtime?.fingerprint ?? ''
     const ignoredKeys = { ...(this.runtime?.ignoredKeys ?? {}) }
     const next = issues.map((issue) => {
       if (issue.id !== issueId) return issue
-      delete ignoredKeys[`${issue.ruleId}::${issue.selector}`]
-      return { ...issue, lifecycle: 'open' as const, ignoreReason: undefined }
+      const transitioned = transitionIssue('Ignored', 'Open')
+      if (!transitioned.ok && issue.lifecycle !== 'ignored') return issue
+      delete ignoredKeys[buildCrossViewportKey(issue.ruleId, issue.selector)]
+      delete ignoredKeys[
+        buildIgnoredIdentityKey({
+          fingerprint: fingerprint || issue.sourceFingerprint || '',
+          ruleId: issue.ruleId,
+          selector: issue.selector,
+        })
+      ]
+      const { ignoreReason: _removed, ...rest } = issue
+      void _removed
+      return { ...rest, lifecycle: 'open' as const }
     })
     if (this.runtime) this.runtime.ignoredKeys = ignoredKeys
     return ok({ issues: next, ignoredKeys })
@@ -444,6 +592,8 @@ export class AnalysisApplicationService {
     issues: LayoutIssue[]
     format: 'json' | 'html'
     sessionStatus: string
+    coveragePercent?: number | undefined
+    coverageWarning?: string | null | undefined
   }): Result<{ filename: string }, AppError> {
     if (input.sessionStatus === 'Draft' || input.sessionStatus === 'Running') {
       return err(Errors.exportFailed('Export requires a completed or partially completed session.'))
@@ -452,9 +602,23 @@ export class AnalysisApplicationService {
       const report = createReport({
         sourceName: sourceDisplayName(input.source),
         sourceMode: input.source.mode,
-        sourceUrl: input.source.mode === 'url' ? input.source.url : undefined,
+        ...(input.source.mode === 'url' ? { sourceUrl: input.source.url } : {}),
         viewport: input.viewport,
         issues: input.issues,
+        ...(this.runtime?.sessionId ? { sessionId: this.runtime.sessionId } : {}),
+        ...(this.runtime?.fingerprint ? { sourceFingerprint: this.runtime.fingerprint } : {}),
+        ...(input.coveragePercent !== undefined ? { coveragePercent: input.coveragePercent } : {}),
+        ...(input.coverageWarning !== undefined ? { coverageWarning: input.coverageWarning } : {}),
+        diagnosticSummary: this.diagnostics.summary(),
+        ...(this.runtime
+          ? {
+              analysisConfiguration: {
+                maxElements: this.runtime.config.maxElements,
+                maxOverlapCandidates: this.runtime.config.maxOverlapCandidates,
+                ruleTimeoutMs: this.runtime.config.ruleTimeoutMs,
+              },
+            }
+          : {}),
       })
       if (input.format === 'json') {
         downloadTextFile(
@@ -465,9 +629,11 @@ export class AnalysisApplicationService {
       } else {
         downloadTextFile(`layout-report-${report.id}.html`, exportReportHtml(report), 'text/html')
       }
-      this.diagnostics.log('report_generated', `Exported ${input.format}`, {
-        sessionId: this.runtime?.sessionId,
-      })
+      this.diagnostics.log(
+        'report_generated',
+        `Exported ${input.format}`,
+        this.runtime?.sessionId ? { sessionId: this.runtime.sessionId } : {},
+      )
       return ok({ filename: `layout-report-${report.id}.${input.format}` })
     } catch (error) {
       return err(Errors.exportFailed(error instanceof Error ? error.message : 'export failed'))

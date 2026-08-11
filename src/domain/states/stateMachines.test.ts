@@ -45,6 +45,15 @@ describe('session state machine', () => {
       expect(transitionSession(state, 'Running').ok).toBe(false)
     }
   })
+
+  it('enumerates only declared session edges', () => {
+    for (const from of Object.keys(SESSION_TRANSITIONS) as Array<keyof typeof SESSION_TRANSITIONS>) {
+      for (const to of Object.keys(SESSION_TRANSITIONS) as Array<keyof typeof SESSION_TRANSITIONS>) {
+        const allowed = canTransition(SESSION_TRANSITIONS, from, to) || from === to
+        expect(transitionSession(from, to).ok).toBe(allowed)
+      }
+    }
+  })
 })
 
 describe('viewport run state machine', () => {
@@ -59,6 +68,19 @@ describe('viewport run state machine', () => {
   it('rejects jumps that skip preparation', () => {
     expect(transitionViewportRun('Pending', 'Analysing').ok).toBe(false)
     expect(canTransition(VIEWPORT_RUN_TRANSITIONS, 'Pending', 'Completed')).toBe(false)
+  })
+
+  it('enumerates only declared viewport-run edges', () => {
+    for (const from of Object.keys(VIEWPORT_RUN_TRANSITIONS) as Array<
+      keyof typeof VIEWPORT_RUN_TRANSITIONS
+    >) {
+      for (const to of Object.keys(VIEWPORT_RUN_TRANSITIONS) as Array<
+        keyof typeof VIEWPORT_RUN_TRANSITIONS
+      >) {
+        const allowed = canTransition(VIEWPORT_RUN_TRANSITIONS, from, to) || from === to
+        expect(transitionViewportRun(from, to).ok).toBe(allowed)
+      }
+    }
   })
 })
 

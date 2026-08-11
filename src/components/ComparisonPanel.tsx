@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { compareImages, fileToDataUrl } from '../engine/comparison'
+import { CompareWithReference } from '../application/usecases'
 import type { ViewportSize } from '../models/types'
 import styles from './ComparisonPanel.module.css'
 
@@ -83,15 +84,38 @@ export function ComparisonPanel({
   }
 
   const handleCompare = async () => {
-    if (!reference || !rendered) {
-      setError('Upload a reference image and capture the rendered preview first. No fake similarity score is shown without both images.')
-      setSimilarity(null)
-      return
+    if (!reference || !rendered || !fileRef.current?.files?.[0]) {
+      // Allow compare when reference was loaded earlier — rebuild via data URL path
+      if (!reference || !rendered) {
+        setError(
+          'Upload a reference image and capture the rendered preview first. No fake similarity score is shown without both images.',
+        )
+        setSimilarity(null)
+        return
+      }
     }
     setBusy(true)
     setError(null)
     try {
-      const result = await compareImages(reference, rendered)
+      const file = fileRef.current?.files?.[0]
+      if (file) {
+        const result = await CompareWithReference({
+          referenceFile: file,
+          renderedDataUrl: rendered,
+          maxBytes: MAX_BYTES,
+        })
+        if (!result.ok) {
+          setError(`${result.error.message} — ${result.error.nextAction}`)
+          setSimilarity(null)
+          return
+        }
+        setSimilarity(result.value.similarity)
+        setDifference(result.value.differenceDataUrl)
+        setMode('difference')
+        return
+      }
+      // Fallback when file input was cleared but data URL remains
+      const result = await compareImages(reference!, rendered!)
       setSimilarity(result.similarity)
       setDifference(result.differenceDataUrl)
       setMode('difference')

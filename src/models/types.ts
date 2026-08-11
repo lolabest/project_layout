@@ -14,6 +14,13 @@ export type IssueType =
   | 'fixed-width'
   | 'small-touch-target'
   | 'inaccessible-control'
+  | 'duplicate-id'
+  | 'invalid-aria'
+  | 'unlabelled-control'
+  | 'sticky-obstruction'
+  | 'unexpected-scrollbar'
+  | 'small-text'
+  | 'image-layout-shift'
 
 export type SourceMode = 'url' | 'markup'
 
@@ -39,7 +46,7 @@ export type TestStatus =
   | 'Completed with errors'
   | 'Failed'
 
-export type IssueLifecycle = 'open' | 'resolved' | 'ignored' | 'stale'
+export type IssueLifecycle = 'open' | 'resolved' | 'ignored' | 'stale' | 'unable-to-verify'
 
 export type ErrorCategory =
   | 'invalid-source'
@@ -58,21 +65,25 @@ export interface ViewportSize {
   name: string
   width: number
   height: number
-  predefined?: boolean
+  predefined?: boolean | undefined
 }
 
 export interface MeasuredValues {
   [key: string]: number | string | boolean | null | undefined
 }
 
-/** Normalized layout issue returned by LayoutAnalyzer. */
+/** Normalized layout issue returned by the rule engine / application layer. */
 export interface LayoutIssue {
   id: string
   ruleId: string
+  ruleVersion?: string | undefined
   type: IssueType
+  category?: string | undefined
   severity: Severity
   title: string
   description: string
+  /** Plain-language why this is a problem (may equal description). */
+  explanation?: string | undefined
   selector: string
   elementPath: string
   viewport: ViewportSize
@@ -81,19 +92,27 @@ export interface LayoutIssue {
   recommendation: string
   confidence: number
   timestamp: string
+  firstDetectedAt?: string | undefined
+  lastDetectedAt?: string | undefined
   lifecycle: IssueLifecycle
-  ignoreReason?: string
+  ignoreReason?: string | undefined
   issueKey: string
-  tagName?: string
+  identitySignature?: string | undefined
+  sourceFingerprint?: string | undefined
+  tagName?: string | undefined
   boundingRect?: {
     top: number
     left: number
     width: number
     height: number
-  }
-  affectedViewports?: string[]
-  firstFailingViewport?: string
-  occursEverywhere?: boolean
+  } | undefined
+  evidenceStyles?: Record<string, string> | undefined
+  overflowArea?: number | undefined
+  intersectionArea?: number | undefined
+  affectedViewports?: string[] | undefined
+  firstFailingViewport?: string | undefined
+  occursEverywhere?: boolean | undefined
+  resolutionType?: 'manual' | 'temporary-fix' | 'unsure' | 'wont-fix' | undefined
 }
 
 /** @deprecated Prefer LayoutIssue — kept for gradual UI migration aliases. */
@@ -181,8 +200,8 @@ export interface ViewportTestResult {
   healthScore: number
   scoreLabel: ScoreLabel
   status: 'success' | 'failed' | 'cancelled'
-  errorMessage?: string
-  referenceImage?: ReferenceImage | null
+  errorMessage?: string | undefined
+  referenceImage?: ReferenceImage | null | undefined
 }
 
 export interface MultiViewportSummary {
@@ -221,6 +240,12 @@ export interface TemporaryStyleChange {
   originalValue: string
   modifiedValue: string
   appliedAt: string
+  sessionId?: string | undefined
+  viewportId?: string | undefined
+  affectedIssueIds?: string[] | undefined
+  introducedIssueIds?: string[] | undefined
+  scoreBefore?: number | undefined
+  scoreAfter?: number | undefined
 }
 
 export interface IssueDelta {
@@ -241,28 +266,47 @@ export interface HealthScoreResult {
 export interface AppError {
   category: ErrorCategory
   message: string
-  diagnostic?: string
+  diagnostic?: string | undefined
   timestamp: string
 }
 
 export interface TestReport {
+  schemaVersion: 1
   id: string
+  sessionId?: string | undefined
+  sourceFingerprint?: string | undefined
   sourceName: string
   sourceMode: SourceMode
-  sourceUrl?: string
+  sourceUrl?: string | undefined
   testedAt: string
   viewport: ViewportSize
-  viewports?: ViewportSize[]
+  viewports?: ViewportSize[] | undefined
   screenshots: string[]
   issues: LayoutIssue[]
-  groupedIssues?: GroupedIssue[]
+  groupedIssues?: GroupedIssue[] | undefined
   recommendations: string[]
-  overallHealthScore?: number
-  scoreLabel?: ScoreLabel
-  ignoredIssues?: LayoutIssue[]
-  temporaryFixes?: TemporaryStyleChange[]
-  knownLimitations?: string[]
-  measurements?: ElementMeasurements | null
+  overallHealthScore?: number | undefined
+  scoreLabel?: ScoreLabel | undefined
+  scoreBreakdown?: {
+    policyVersion: string
+    startingScore: number
+    finalScore: number
+    lines: Array<{ key: string; amount: number; reason: string }>
+  } | undefined
+  coveragePercent?: number | undefined
+  coverageWarning?: string | null | undefined
+  ignoredIssues?: LayoutIssue[] | undefined
+  resolvedIssues?: LayoutIssue[] | undefined
+  temporaryFixes?: TemporaryStyleChange[] | undefined
+  knownLimitations?: string[] | undefined
+  measurements?: ElementMeasurements | null | undefined
+  ruleEngineVersion?: string | undefined
+  scoringPolicyVersion?: string | undefined
+  failedRules?: Array<{ ruleId: string; diagnostic?: string | undefined }> | undefined
+  skippedRules?: Array<{ ruleId: string; reason?: string | undefined }> | undefined
+  diagnosticSummary?: string[] | undefined
+  integrityHash?: string | undefined
+  analysisConfiguration?: Record<string, number | string | boolean> | undefined
 }
 
 export interface TestSession {
@@ -277,36 +321,36 @@ export interface TestSession {
   totalIssueCount: number
   issueCountBySeverity: Record<Severity, number>
   status: TestStatus
-  healthScore?: number
-  scoreLabel?: ScoreLabel
-  report?: TestReport
-  multiViewportSummary?: MultiViewportSummary
-  ignoredIssueKeys?: Record<string, string>
-  temporaryFixes?: TemporaryStyleChange[]
+  healthScore?: number | undefined
+  scoreLabel?: ScoreLabel | undefined
+  report?: TestReport | undefined
+  multiViewportSummary?: MultiViewportSummary | undefined
+  ignoredIssueKeys?: Record<string, string> | undefined
+  temporaryFixes?: TemporaryStyleChange[] | undefined
   /** Legacy fields retained for older stored sessions */
-  viewport?: ViewportSize
-  orientation?: Orientation
-  scale?: number
-  issues?: LayoutIssue[]
+  viewport?: ViewportSize | undefined
+  orientation?: Orientation | undefined
+  scale?: number | undefined
+  issues?: LayoutIssue[] | undefined
 }
 
 export interface AnalysisResult {
   issues: LayoutIssue[]
   analyzedAt: string
   accessible: boolean
-  errorMessage?: string
-  ruleErrors?: AppError[]
-  truncated?: boolean
-  healthScore?: HealthScoreResult
+  errorMessage?: string | undefined
+  ruleErrors?: AppError[] | undefined
+  truncated?: boolean | undefined
+  healthScore?: HealthScoreResult | undefined
 }
 
 export interface AnalyzerOptions {
   viewport: ViewportSize
-  minTouchTarget?: number
-  fixedWidthThreshold?: number
-  maxElements?: number
-  enabledRules?: string[]
-  signal?: AbortSignal
+  minTouchTarget?: number | undefined
+  fixedWidthThreshold?: number | undefined
+  maxElements?: number | undefined
+  enabledRules?: string[] | undefined
+  signal?: AbortSignal | undefined
 }
 
 export const PREDEFINED_VIEWPORTS: ViewportSize[] = [
@@ -339,7 +383,14 @@ export const ISSUE_TYPE_LABELS: Record<IssueType, string> = {
   'broken-link': 'Broken Link',
   'fixed-width': 'Fixed Width',
   'small-touch-target': 'Small Touch Target',
-  'inaccessible-control': 'Inaccessible Form Control',
+  'inaccessible-control': 'Inaccessible Interactive Control',
+  'duplicate-id': 'Duplicate DOM ID',
+  'invalid-aria': 'Invalid ARIA Reference',
+  'unlabelled-control': 'Unlabelled Form Control',
+  'sticky-obstruction': 'Hidden Behind Sticky/Fixed',
+  'unexpected-scrollbar': 'Unexpected Scrollbar',
+  'small-text': 'Unreadable Small Text',
+  'image-layout-shift': 'Image Layout Shift Risk',
 }
 
 export const ACCESSIBILITY_ISSUE_TYPES: IssueType[] = [
@@ -348,6 +399,9 @@ export const ACCESSIBILITY_ISSUE_TYPES: IssueType[] = [
   'broken-link',
   'small-touch-target',
   'inaccessible-control',
+  'duplicate-id',
+  'invalid-aria',
+  'unlabelled-control',
 ]
 
 export const OVERFLOW_ISSUE_TYPES: IssueType[] = [
