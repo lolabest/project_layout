@@ -1,0 +1,177 @@
+.workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  position: relative;
+}
+
+.empty {
+  text-align: center;
+  color: var(--text-muted);
+  max-width: 420px;
+}
+
+.empty h3 {
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.empty p {
+  margin: 0;
+}
+
+.stage {
+  position: relative;
+}
+
+.rulerCorner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 24px;
+  height: 24px;
+  background: #1b2130;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  z-index: 3;
+}
+
+.rulerX {
+  position: absolute;
+  top: 0;
+  left: 24px;
+  height: 24px;
+  background-color: #1b2130;
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent,
+    transparent 49px,
+    var(--ruler) 49px,
+    var(--ruler) 50px
+  );
+  border-bottom: 1px solid var(--border);
+  z-index: 2;
+}
+
+.rulerY {
+  position: absolute;
+  top: 24px;
+  left: 0;
+  width: 24px;
+  background-color: #1b2130;
+  background-image: repeating-linear-gradient(
+    180deg,
+    transparent,
+    transparent 49px,
+    var(--ruler) 49px,
+    var(--ruler) 50px
+  );
+  border-right: 1px solid var(--border);
+  z-index: 2;
+}
+
+.device {
+  position: relative;
+  background: #fff;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border-strong);
+  overflow: hidden;
+}
+
+.scaler {
+  transform-origin: top left;
+  position: relative;
+}
+
+.iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: white;
+  display: block;
+}
+
+.overlayLayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+}
+
+.bp {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--breakpoint);
+}
+
+.hoverBox,
+.selectedBox,
+.highlightBox {
+  position: absolute;
+  pointer-events: none;
+  z-index: 4;
+  box-sizing: border-box;
+}
+
+.hoverBox {
+  border: 1px dashed rgba(61, 139, 253, 0.9);
+  background: rgba(61, 139, 253, 0.08);
+}
+
+.selectedBox {
+  border: 2px solid rgba(61, 214, 140, 0.95);
+  background: rgba(61, 214, 140, 0.08);
+}
+
+.highlightBox {
+  border: 2px solid rgba(255, 176, 32, 0.95);
+  background: rgba(255, 176, 32, 0.12);
+  box-shadow: 0 0 0 2px rgba(255, 176, 32, 0.25);
+  animation: flash 1.2s ease;
+}
+
+.spacingPad {
+  position: absolute;
+  pointer-events: none;
+  z-index: 3;
+  border-style: solid;
+  border-color: rgba(255, 176, 32, 0.35);
+  background: rgba(61, 214, 140, 0.12);
+  box-sizing: border-box;
+}
+
+.refOverlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  z-index: 5;
+  mix-blend-mode: normal;
+}
+
+@keyframes flash {
+  0% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+  }
+}
