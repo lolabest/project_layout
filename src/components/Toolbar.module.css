@@ -82,3 +82,11 @@
   border-color: var(--accent);
   color: #d7e8ff;
 }
+
+.score {
+  color: var(--success);
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+  padding: 0 6px;
+}

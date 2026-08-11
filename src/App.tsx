@@ -11,25 +11,55 @@ import { RightSidebar } from './components/RightSidebar'
 import { PreviewFrame, type PreviewFrameHandle } from './components/PreviewFrame'
 import { ComparisonPanel } from './components/ComparisonPanel'
 import { analyzeDocument, countBySeverity } from './engine/analyzer'
-import { measureElement, applyTemporaryStyles } from './engine/measurements'
+import {
+  applyTemporaryStyles,
+  createStyleEditSession,
+  measureElement,
+  resetAllStyles,
+  resetElementStyles,
+  undoLastChange,
+  type StyleEditSession,
+} from './engine/measurements'
 import { captureIframeScreenshot } from './engine/screenshot'
 import {
+  buildViewportResult,
   createReport,
   createSession,
   deleteSession,
   downloadTextFile,
   exportReportHtml,
   exportReportJson,
+  finalizeSessionStatus,
   loadSessions,
   saveSession,
   summarizeMultiViewport,
 } from './engine/reports'
-import { sourceDisplayName, validateSource } from './engine/validation'
+import { sourceDisplayName } from './engine/validation'
+import { waitForLayoutStabilization, createAnalysisController } from './engine/stabilize'
+import {
+  beginSourceLoad,
+  canAnalyzeStrict,
+  completeSourceLoad,
+  createInitialSourceState,
+  markSourceEdited,
+} from './engine/sourceState'
+import {
+  applyIgnoredState,
+  computeIssueDelta,
+  countActiveIssues,
+  ignoreIssue,
+  markStaleIfMissing,
+} from './engine/issueLifecycle'
+import { calculateHealthScore, sortIssues, type IssueSortKey } from './engine/scoring'
+import { validateViewportDimensions } from './engine/viewportUtils'
 import type {
-  DetectedIssue,
+  AppError,
   ElementMeasurements,
   InspectionSettings,
+  IssueDelta,
+  IssueLifecycle,
   IssueType,
+  LayoutIssue,
   MultiViewportSummary,
   Orientation,
   PreviewSource,
@@ -37,11 +67,7 @@ import type {
   TestSession,
   ViewportSize,
 } from './models/types'
-import {
-  ACCESSIBILITY_ISSUE_TYPES,
-  OVERFLOW_ISSUE_TYPES,
-  PREDEFINED_VIEWPORTS,
-} from './models/types'
+import { PREDEFINED_VIEWPORTS } from './models/types'
 import appStyles from './styles/App.module.css'
 import './styles/global.css'
 
@@ -56,6 +82,9 @@ const SAMPLE_HTML = `<header class="hero">
       <img src="https://invalid.example/missing.jpg" />
       <h2>Broken image & missing alt</h2>
       <p class="clip">This paragraph is intentionally clipped with overflow hidden and nowrap so text gets cut off at the edge of the box.</p>
+      <label>Name <input id="dup" type="text" /></label>
+      <input id="dup" type="email" aria-labelledby="missing-label" />
+      <button></button>
     </article>
     <article class="card wide">
       <img src="https://placehold.co/800x200" alt="Wide placeholder" class="overflow-img" />
@@ -119,19 +148,15 @@ const SAMPLE_CSS = `body {
   width: 28px;
   height: 22px;
   font-size: 10px;
-}
-.overlap {
-  position: absolute;
-  top: 40px;
-  left: 20px;
-  background: rgba(255,0,0,.3);
-  padding: 20px;
 }`
 
 export default function App() {
   const previewRef = useRef<PreviewFrameHandle>(null)
-  const revertStylesRef = useRef<(() => void) | null>(null)
   const selectedElementRef = useRef<HTMLElement | null>(null)
+  const styleSessionRef = useRef<StyleEditSession>(createStyleEditSession())
+  const analysisRef = useRef<ReturnType<typeof createAnalysisController> | null>(null)
+  const viewportDebounceRef = useRef<number | null>(null)
+  const runningSessionRef = useRef(false)
 
   const [source, setSource] = useState<PreviewSource>({
     mode: 'markup',
@@ -140,17 +165,23 @@ export default function App() {
     css: SAMPLE_CSS,
     name: 'Sample layout',
   })
+  const [sourceCtrl, setSourceCtrl] = useState(() =>
+    createInitialSourceState({
+      mode: 'markup',
+      url: 'https://example.com',
+      html: SAMPLE_HTML,
+      css: SAMPLE_CSS,
+      name: 'Sample layout',
+    }),
+  )
+
   const [viewport, setViewport] = useState<ViewportSize>(PREDEFINED_VIEWPORTS[0])
   const [orientation, setOrientation] = useState<Orientation>('portrait')
   const [scale, setScale] = useState(0.75)
   const [fitToWorkspace, setFitToWorkspace] = useState(true)
   const [loadedKey, setLoadedKey] = useState(0)
-  const [inputErrors, setInputErrors] = useState<string[]>([])
-  const [statusMessage, setStatusMessage] = useState<string | null>(null)
-  const [statusTone, setStatusTone] = useState<'info' | 'error' | 'warning' | 'success'>('info')
-  const [frameLoading, setFrameLoading] = useState(false)
-  const [previewReady, setPreviewReady] = useState(false)
   const [frameAccessible, setFrameAccessible] = useState(false)
+  const [autoAnalyze, setAutoAnalyze] = useState(false)
 
   const [inspection, setInspection] = useState<InspectionSettings>({
     showGrid: false,
@@ -161,29 +192,45 @@ export default function App() {
     gridSize: 8,
   })
 
-  const [issues, setIssues] = useState<DetectedIssue[]>([])
+  const [issues, setIssues] = useState<LayoutIssue[]>([])
   const [analyzing, setAnalyzing] = useState(false)
+  const [progress, setProgress] = useState<string | null>(null)
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null)
   const [highlightSelector, setHighlightSelector] = useState<string | null>(null)
   const [selectedSelector, setSelectedSelector] = useState<string | null>(null)
   const [measurements, setMeasurements] = useState<ElementMeasurements | null>(null)
   const [severityFilter, setSeverityFilter] = useState<Severity | 'all'>('all')
   const [typeFilter, setTypeFilter] = useState<IssueType | 'all'>('all')
+  const [lifecycleFilter, setLifecycleFilter] = useState<IssueLifecycle | 'all'>('open')
+  const [ruleFilter, setRuleFilter] = useState<string | 'all'>('all')
+  const [sortKey, setSortKey] = useState<IssueSortKey>('severity')
   const [rightTab, setRightTab] = useState<'issues' | 'element' | 'results'>('issues')
 
   const [multiSummary, setMultiSummary] = useState<MultiViewportSummary | null>(null)
   const [viewportFilter, setViewportFilter] = useState<string | 'all'>('all')
   const [comparisonOpen, setComparisonOpen] = useState(false)
+  const [ignoredKeys, setIgnoredKeys] = useState<Record<string, string>>({})
+  const [issueDelta, setIssueDelta] = useState<IssueDelta | null>(null)
+  const [scoreBefore, setScoreBefore] = useState<number | null>(null)
+  const [scoreAfter, setScoreAfter] = useState<number | null>(null)
+  const [diagnostics, setDiagnostics] = useState<string[]>([])
+  const [sessionStatus, setSessionStatus] = useState<string>('Draft')
+  const [canUndo, setCanUndo] = useState(false)
 
   const [leftWidth, setLeftWidth] = useState(300)
   const [rightWidth, setRightWidth] = useState(360)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
   const [sessions, setSessions] = useState<TestSession[]>(() => loadSessions())
+  const [statusTone, setStatusTone] = useState<'info' | 'error' | 'warning' | 'success'>('info')
 
   const dragRef = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(
     null,
   )
+
+  const health = calculateHealthScore(issues)
+  const activeCount = countActiveIssues(issues)
+  const sortedIssues = sortIssues(issues, sortKey)
 
   useEffect(() => {
     const onMove = (event: MouseEvent) => {
@@ -207,7 +254,11 @@ export default function App() {
   }, [])
 
   const patchSource = (patch: Partial<PreviewSource>) => {
-    setSource((prev) => ({ ...prev, ...patch }))
+    setSource((prev) => {
+      const next = { ...prev, ...patch }
+      setSourceCtrl((ctrl) => markSourceEdited(ctrl, next))
+      return next
+    })
   }
 
   const handleFrameStatus = useCallback(
@@ -218,201 +269,316 @@ export default function App() {
       accessible: boolean
       message?: string
     }) => {
-      setFrameLoading(status.loading)
-      setPreviewReady(status.loaded)
       setFrameAccessible(status.accessible)
-      if (status.message) {
-        setStatusMessage(status.message)
-        setStatusTone(status.blocked ? 'warning' : status.accessible ? 'success' : 'info')
+      if (status.loading) {
+        setSourceCtrl((ctrl) => ({ ...ctrl, state: 'loading', message: 'Loading preview…' }))
+        setStatusTone('info')
+        return
       }
+      setSourceCtrl((ctrl) =>
+        completeSourceLoad(ctrl, {
+          blocked: status.blocked,
+          accessible: status.accessible,
+          failed: status.loaded === false,
+          message: status.message,
+        }),
+      )
+      setStatusTone(status.blocked ? 'warning' : status.accessible ? 'success' : 'info')
     },
     [],
   )
 
+  const cancelAnalysis = () => {
+    analysisRef.current?.cancel()
+    runningSessionRef.current = false
+    setAnalyzing(false)
+    setProgress(null)
+    setSessionStatus('Failed')
+    setSourceCtrl((c) => ({ ...c, message: 'Analysis cancelled.' }))
+    setStatusTone('warning')
+  }
+
   const loadPreview = () => {
-    const validation = validateSource(source)
-    if (!validation.valid) {
-      setInputErrors(validation.errors)
-      setStatusMessage(validation.errors[0] ?? 'Invalid input')
+    const next = beginSourceLoad(sourceCtrl, source)
+    setSourceCtrl(next)
+    if (next.state === 'invalid') {
       setStatusTone('error')
       return
     }
-    setInputErrors([])
     setIssues([])
     setSelectedIssueId(null)
     setHighlightSelector(null)
     setSelectedSelector(null)
     setMeasurements(null)
+    setIssueDelta(null)
     selectedElementRef.current = null
-    revertStylesRef.current?.()
-    revertStylesRef.current = null
+    styleSessionRef.current = createStyleEditSession()
+    setCanUndo(false)
     setLoadedKey((k) => k + 1)
-    setFrameLoading(true)
-    setStatusMessage('Loading preview…')
     setStatusTone('info')
   }
 
-  const refreshPreview = () => {
-    if (loadedKey === 0) return
-    loadPreview()
+  const runAnalysisForDoc = async (
+    doc: Document,
+    vp: ViewportSize,
+    signal?: AbortSignal,
+  ) => {
+    const stable = await waitForLayoutStabilization(doc, { signal, timeoutMs: 5000 })
+    const result = analyzeDocument(doc, { viewport: vp, signal })
+    const withIgnored = applyIgnoredState(result.issues, ignoredKeys)
+    const diag = [
+      ...(result.ruleErrors ?? []).map((e: AppError) => `${e.message}${e.diagnostic ? ` (${e.diagnostic})` : ''}`),
+      ...(stable.timedOut ? ['Layout stabilization timed out — analysis continued with available content.'] : []),
+      ...(result.truncated ? [result.errorMessage ?? 'Element sampling truncated for performance.'] : []),
+    ]
+    return { issues: withIgnored, diagnostics: diag, health: result.healthScore }
   }
 
   const runAnalysis = async () => {
-    const doc = previewRef.current?.getDocument()
-    if (!doc) {
-      setStatusMessage(
-        'Cannot analyze: preview document is inaccessible. External sites often block cross-origin inspection. Paste HTML/CSS to analyze locally.',
-      )
+    if (runningSessionRef.current) {
+      setSourceCtrl((c) => ({
+        ...c,
+        message: 'A test session is already running. Cancel it before starting another.',
+      }))
+      setStatusTone('warning')
+      return
+    }
+    if (!canAnalyzeStrict(sourceCtrl.state, frameAccessible)) {
+      setSourceCtrl((c) => ({
+        ...c,
+        message:
+          'Cannot analyze until the preview is fully loaded and inspectable. External sites often block cross-origin inspection — switch to HTML/CSS mode.',
+      }))
       setStatusTone('warning')
       return
     }
 
+    const doc = previewRef.current?.getDocument()
+    if (!doc) {
+      setSourceCtrl((c) => ({
+        ...c,
+        message: 'Preview inspection unavailable. Paste HTML/CSS to analyse locally.',
+      }))
+      setStatusTone('warning')
+      return
+    }
+
+    const controller = createAnalysisController()
+    analysisRef.current = controller
+    runningSessionRef.current = true
     setAnalyzing(true)
-    setStatusMessage('Running layout analysis…')
+    setProgress('Stabilizing layout…')
+    setSessionStatus('Running')
     setStatusTone('info')
 
-    // Allow layout to settle
-    await new Promise((r) => setTimeout(r, 50))
-
-    const result = analyzeDocument(doc, {
-      viewportWidth: viewport.width,
-      viewportHeight: viewport.height,
-    })
-
-    setIssues(result.issues)
-    setAnalyzing(false)
-    setRightTab('issues')
-
-    const counts = countBySeverity(result.issues)
-    setStatusMessage(
-      `Analysis complete: ${result.issues.length} issues (${counts.critical} critical, ${counts.warning} warnings, ${counts.info} info).`,
-    )
-    setStatusTone(counts.critical > 0 ? 'warning' : 'success')
+    try {
+      const { issues: nextIssues, diagnostics: diag } = await runAnalysisForDoc(
+        doc,
+        viewport,
+        controller.controller.signal,
+      )
+      if (controller.isStale()) return
+      setIssues(nextIssues)
+      setDiagnostics(diag)
+      setRightTab('issues')
+      const counts = countBySeverity(nextIssues)
+      setSourceCtrl((c) => ({
+        ...c,
+        message: `Analysis complete: ${countActiveIssues(nextIssues)} active issues (${counts.critical} critical, ${counts.warning} warnings, ${counts.info} info).`,
+      }))
+      setStatusTone(counts.critical > 0 ? 'warning' : 'success')
+      setSessionStatus('Completed')
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      setDiagnostics([error instanceof Error ? error.message : 'Analysis failed'])
+      setSessionStatus('Failed')
+      setStatusTone('error')
+      setSourceCtrl((c) => ({ ...c, message: 'Analysis failed. See diagnostics for details.' }))
+    } finally {
+      runningSessionRef.current = false
+      setAnalyzing(false)
+      setProgress(null)
+      analysisRef.current = null
+    }
   }
 
   const runAllViewports = async () => {
+    if (runningSessionRef.current) {
+      setSourceCtrl((c) => ({
+        ...c,
+        message: 'A test session is already running. Cancel it before starting another.',
+      }))
+      setStatusTone('warning')
+      return
+    }
+    if (sourceCtrl.state !== 'loaded' && sourceCtrl.state !== 'blocked') {
+      setSourceCtrl((c) => ({ ...c, message: 'Load a valid preview before running all viewports.' }))
+      setStatusTone('error')
+      return
+    }
     if (source.mode === 'url' && !frameAccessible) {
-      setStatusMessage(
-        'Multi-viewport analysis requires same-origin document access. Use pasted HTML/CSS.',
-      )
+      setSourceCtrl((c) => ({
+        ...c,
+        message:
+          'Multi-viewport analysis requires same-origin document access. Switch to HTML/CSS mode.',
+      }))
       setStatusTone('warning')
       return
     }
 
-    if (loadedKey === 0) {
-      setStatusMessage('Load a preview before running all viewports.')
-      setStatusTone('error')
-      return
-    }
-
+    const controller = createAnalysisController()
+    analysisRef.current = controller
+    runningSessionRef.current = true
     setAnalyzing(true)
-    setStatusMessage('Running tests across all predefined viewports…')
+    setSessionStatus('Running')
     setStatusTone('info')
 
     const previous = viewport
     const results = []
+    const allDiag: string[] = []
 
-    for (const vp of PREDEFINED_VIEWPORTS) {
-      setViewport(vp)
-      await new Promise((r) => setTimeout(r, 150))
+    try {
+      for (let i = 0; i < PREDEFINED_VIEWPORTS.length; i++) {
+        if (controller.isStale()) break
+        const vp = PREDEFINED_VIEWPORTS[i]
+        setViewport(vp)
+        setProgress(`Testing ${vp.name} (${i + 1}/${PREDEFINED_VIEWPORTS.length})…`)
+        await new Promise((r) => setTimeout(r, 120))
 
-      if (source.mode === 'markup') {
-        setLoadedKey((k) => k + 1)
-        await new Promise<void>((resolve) => {
-          const started = Date.now()
-          const poll = () => {
-            const iframe = previewRef.current?.getIframe()
-            const doc = previewRef.current?.getDocument()
-            if (doc?.body || Date.now() - started > 3000) {
-              // Allow images / layout to settle
-              setTimeout(() => resolve(), 250)
-              return
-            }
-            if (!iframe) {
+        if (source.mode === 'markup') {
+          setLoadedKey((k) => k + 1)
+          await new Promise<void>((resolve) => {
+            const started = Date.now()
+            const poll = () => {
+              const doc = previewRef.current?.getDocument()
+              if (doc?.body || Date.now() - started > 3000) {
+                setTimeout(() => resolve(), 200)
+                return
+              }
               setTimeout(poll, 50)
-              return
             }
-            setTimeout(poll, 50)
-          }
-          poll()
-        })
-      } else {
-        await new Promise((r) => setTimeout(r, 300))
+            poll()
+          })
+        } else {
+          await new Promise((r) => setTimeout(r, 250))
+        }
+
+        const iframe = previewRef.current?.getIframe()
+        const doc = previewRef.current?.getDocument()
+        if (!doc || !iframe || controller.isStale()) {
+          results.push(buildViewportResult(vp, [], null, 'failed', 'Preview unavailable'))
+          continue
+        }
+
+        try {
+          const { issues: vpIssues, diagnostics: diag } = await runAnalysisForDoc(
+            doc,
+            vp,
+            controller.controller.signal,
+          )
+          allDiag.push(...diag.map((d) => `[${vp.name}] ${d}`))
+          const shot = await captureIframeScreenshot(iframe)
+          results.push(buildViewportResult(vp, vpIssues, shot, 'success'))
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') break
+          results.push(
+            buildViewportResult(
+              vp,
+              [],
+              null,
+              'failed',
+              error instanceof Error ? error.message : 'Viewport analysis failed',
+            ),
+          )
+        }
       }
 
-      const iframe = previewRef.current?.getIframe()
-      const doc = previewRef.current?.getDocument()
-      if (!doc || !iframe) {
-        results.push({
-          viewport: vp,
-          issues: [],
-          screenshotDataUrl: null,
-          criticalCount: 0,
-          overflowCount: 0,
-          accessibilityCount: 0,
-        })
-        continue
+      if (controller.isStale()) {
+        setSessionStatus('Failed')
+        return
       }
 
-      const analysis = analyzeDocument(doc, {
-        viewportWidth: vp.width,
-        viewportHeight: vp.height,
-      })
-      const shot = await captureIframeScreenshot(iframe)
-      const criticalCount = analysis.issues.filter((i) => i.severity === 'critical').length
-      const overflowCount = analysis.issues.filter((i) =>
-        OVERFLOW_ISSUE_TYPES.includes(i.type),
-      ).length
-      const accessibilityCount = analysis.issues.filter((i) =>
-        ACCESSIBILITY_ISSUE_TYPES.includes(i.type),
-      ).length
+      setViewport(previous)
+      const summary = summarizeMultiViewport(sourceDisplayName(source), results)
+      setMultiSummary(summary)
+      const flat = applyIgnoredState(
+        results.flatMap((r) => r.issues),
+        ignoredKeys,
+      )
+      setIssues(flat)
+      setDiagnostics(allDiag)
+      setAnalyzing(false)
+      setRightTab('results')
+      const status = finalizeSessionStatus(results)
+      setSessionStatus(status)
+      setSourceCtrl((c) => ({
+        ...c,
+        message: `All viewports finished (${status}): ${summary.totalIssues} grouped issues, score ${summary.overallHealthScore}.`,
+      }))
+      setStatusTone(status === 'Failed' ? 'error' : summary.totalCritical > 0 ? 'warning' : 'success')
 
-      results.push({
-        viewport: vp,
-        issues: analysis.issues,
-        screenshotDataUrl: shot,
-        criticalCount,
-        overflowCount,
-        accessibilityCount,
-      })
-    }
-
-    setViewport(previous)
-    const summary = summarizeMultiViewport(sourceDisplayName(source), results)
-    setMultiSummary(summary)
-    setIssues(results.flatMap((r) => r.issues))
-    setAnalyzing(false)
-    setRightTab('results')
-    setStatusMessage(
-      `All viewports tested: ${summary.totalIssues} issues total, ${summary.totalCritical} critical.`,
-    )
-    setStatusTone(summary.totalCritical > 0 ? 'warning' : 'success')
-
-    const session = createSession({
-      name: sourceDisplayName(source),
-      source,
-      viewport: previous,
-      orientation,
-      scale,
-      issues: results.flatMap((r) => r.issues),
-      multiViewportSummary: summary,
-      report: createReport({
-        sourceName: sourceDisplayName(source),
-        sourceMode: source.mode,
-        sourceUrl: source.mode === 'url' ? source.url : undefined,
+      const session = createSession({
+        name: sourceDisplayName(source),
+        source,
+        selectedViewports: PREDEFINED_VIEWPORTS,
+        status,
+        results,
+        ignoredIssueKeys: ignoredKeys,
+        temporaryFixes: styleSessionRef.current.changes,
+        multiViewportSummary: summary,
         viewport: previous,
-        issues: results.flatMap((r) => r.issues),
-        screenshots: results.map((r) => r.screenshotDataUrl).filter(Boolean) as string[],
-      }),
-    })
-    setSessions(saveSession(session))
+        orientation,
+        scale,
+        issues: flat,
+        report: createReport({
+          sourceName: sourceDisplayName(source),
+          sourceMode: source.mode,
+          sourceUrl: source.mode === 'url' ? source.url : undefined,
+          viewport: previous,
+          viewports: PREDEFINED_VIEWPORTS,
+          issues: flat,
+          screenshots: results.map((r) => r.screenshotDataUrl).filter(Boolean) as string[],
+          temporaryFixes: styleSessionRef.current.changes,
+        }),
+      })
+      setSessions(saveSession(session))
+    } finally {
+      runningSessionRef.current = false
+      setAnalyzing(false)
+      setProgress(null)
+      analysisRef.current = null
+    }
   }
 
-  const onSelectIssue = (issue: DetectedIssue) => {
+  // Debounced viewport change → optional auto-analyze
+  const handleViewportChange = (next: ViewportSize) => {
+    const check = validateViewportDimensions(next.width, next.height)
+    if (!check.valid) {
+      setSourceCtrl((c) => ({
+        ...c,
+        errors: check.errors,
+        message: check.errors[0] ?? 'Invalid viewport',
+      }))
+      setStatusTone('error')
+      // still apply clamped-ish values for UX
+    }
+    setViewport(next)
+    if (viewportDebounceRef.current) window.clearTimeout(viewportDebounceRef.current)
+    viewportDebounceRef.current = window.setTimeout(() => {
+      if (autoAnalyze && canAnalyzeStrict(sourceCtrl.state, frameAccessible)) {
+        void runAnalysis()
+      }
+    }, 350)
+  }
+
+  const onSelectIssue = (issue: LayoutIssue) => {
     setSelectedIssueId(issue.id)
     setHighlightSelector(issue.selector)
     setSelectedSelector(issue.selector)
     setRightTab('issues')
+    if (issue.viewport.id !== viewport.id) {
+      setViewport(issue.viewport)
+    }
 
     const doc = previewRef.current?.getDocument()
     if (!doc) return
@@ -421,10 +587,31 @@ export default function App() {
       if (el) {
         selectedElementRef.current = el as HTMLElement
         setMeasurements(measureElement(el))
+        setIssues((prev) =>
+          prev.map((i) =>
+            i.id === issue.id && i.lifecycle === 'stale' ? { ...i, lifecycle: 'open' } : i,
+          ),
+        )
+      } else {
+        setIssues((prev) =>
+          prev.map((i) => (i.id === issue.id ? { ...i, lifecycle: 'stale' } : i)),
+        )
+        setSourceCtrl((c) => ({
+          ...c,
+          message: 'Issue element no longer exists — marked stale. Rerun analysis.',
+        }))
+        setStatusTone('warning')
       }
     } catch {
-      /* ignore invalid selector */
+      setIssues((prev) => prev.map((i) => (i.id === issue.id ? { ...i, lifecycle: 'stale' } : i)))
     }
+  }
+
+  const onIgnoreIssue = (issue: LayoutIssue) => {
+    const reason = window.prompt('Optional reason for ignoring this issue:', '') ?? ''
+    const result = ignoreIssue(issues, issue.id, reason)
+    setIssues(result.issues)
+    setIgnoredKeys((prev) => ({ ...prev, ...result.ignoredKeys }))
   }
 
   const onSelectElement = (selector: string | null, element: Element | null) => {
@@ -439,59 +626,120 @@ export default function App() {
     setRightTab('element')
   }
 
+  const reanalyzeAfterCss = async () => {
+    const doc = previewRef.current?.getDocument()
+    if (!doc || !canAnalyzeStrict(sourceCtrl.state, frameAccessible)) return
+    const before = issues
+    const beforeScore = calculateHealthScore(before).score
+    setScoreBefore(beforeScore)
+    const { issues: next } = await runAnalysisForDoc(doc, viewport)
+    setIssues(next)
+    setIssueDelta(computeIssueDelta(before, next))
+    setScoreAfter(calculateHealthScore(next).score)
+  }
+
   const onApplyStyles = (styles: Record<string, string>) => {
     const el = selectedElementRef.current
     if (!el) return
-    revertStylesRef.current?.()
-    revertStylesRef.current = applyTemporaryStyles(el, styles)
+    applyTemporaryStyles(el, styles, styleSessionRef.current)
+    setCanUndo(styleSessionRef.current.changes.length > 0)
     setMeasurements(measureElement(el))
-    setStatusMessage('Temporary CSS applied to the selected element.')
-    setStatusTone('success')
+    setSourceCtrl((c) => ({
+      ...c,
+      message: 'Temporary CSS applied (source unchanged). Re-analysing…',
+    }))
+    void reanalyzeAfterCss()
   }
 
-  const onResetStyles = () => {
-    revertStylesRef.current?.()
-    revertStylesRef.current = null
-    if (selectedElementRef.current) {
-      setMeasurements(measureElement(selectedElementRef.current))
-    }
-    setStatusMessage('Temporary CSS edits reset.')
-    setStatusTone('info')
+  const onUndo = () => {
+    const doc = previewRef.current?.getDocument()
+    if (!doc) return
+    undoLastChange(doc, styleSessionRef.current)
+    setCanUndo(styleSessionRef.current.changes.length > 0)
+    if (selectedElementRef.current) setMeasurements(measureElement(selectedElementRef.current))
+    void reanalyzeAfterCss()
+  }
+
+  const onResetElement = () => {
+    const doc = previewRef.current?.getDocument()
+    if (!doc || !selectedSelector) return
+    resetElementStyles(doc, styleSessionRef.current, selectedSelector)
+    setCanUndo(styleSessionRef.current.changes.length > 0)
+    if (selectedElementRef.current) setMeasurements(measureElement(selectedElementRef.current))
+    void reanalyzeAfterCss()
+  }
+
+  const onResetAll = () => {
+    const doc = previewRef.current?.getDocument()
+    if (!doc) return
+    resetAllStyles(doc, styleSessionRef.current)
+    setCanUndo(false)
+    if (selectedElementRef.current) setMeasurements(measureElement(selectedElementRef.current))
+    void reanalyzeAfterCss()
   }
 
   const exportCurrent = (format: 'json' | 'html') => {
+    if (sessionStatus === 'Draft' || sessionStatus === 'Running') {
+      setSourceCtrl((c) => ({
+        ...c,
+        message: 'Export is available for completed or partially completed sessions. Run a test first.',
+      }))
+      setStatusTone('warning')
+      return
+    }
     const report = createReport({
       sourceName: sourceDisplayName(source),
       sourceMode: source.mode,
       sourceUrl: source.mode === 'url' ? source.url : undefined,
       viewport,
+      viewports: multiSummary?.results.map((r) => r.viewport) ?? [viewport],
       issues,
       screenshots:
-        multiSummary?.results.map((r) => r.screenshotDataUrl).filter(Boolean) as string[] | undefined,
+        (multiSummary?.results.map((r) => r.screenshotDataUrl).filter(Boolean) as string[]) ?? [],
+      temporaryFixes: styleSessionRef.current.changes,
+      measurements,
     })
 
-    if (format === 'json') {
-      downloadTextFile(
-        `layout-report-${report.id}.json`,
-        exportReportJson(report),
-        'application/json',
-      )
-    } else {
-      downloadTextFile(`layout-report-${report.id}.html`, exportReportHtml(report), 'text/html')
+    try {
+      if (format === 'json') {
+        downloadTextFile(
+          `layout-report-${report.id}.json`,
+          exportReportJson(report),
+          'application/json',
+        )
+      } else {
+        downloadTextFile(`layout-report-${report.id}.html`, exportReportHtml(report), 'text/html')
+      }
+    } catch (error) {
+      setDiagnostics([
+        `Export failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      ])
+      setStatusTone('error')
+      return
     }
 
     const session = createSession({
       name: sourceDisplayName(source),
       source,
+      selectedViewports: multiSummary?.results.map((r) => r.viewport) ?? [viewport],
+      status: sessionStatus === 'Failed' ? 'Failed' : 'Completed',
+      results: multiSummary?.results ?? [
+        buildViewportResult(viewport, issues, null, 'success'),
+      ],
+      ignoredIssueKeys: ignoredKeys,
+      temporaryFixes: styleSessionRef.current.changes,
+      report,
+      multiViewportSummary: multiSummary ?? undefined,
       viewport,
       orientation,
       scale,
       issues,
-      report,
-      multiViewportSummary: multiSummary ?? undefined,
     })
     setSessions(saveSession(session))
-    setStatusMessage(`Report exported as ${format.toUpperCase()} and session saved.`)
+    setSourceCtrl((c) => ({
+      ...c,
+      message: `Report exported as ${format.toUpperCase()} and session saved.`,
+    }))
     setStatusTone('success')
   }
 
@@ -499,33 +747,46 @@ export default function App() {
     const session = createSession({
       name: sourceDisplayName(source),
       source,
+      selectedViewports: [viewport],
+      status: sessionStatus === 'Running' ? 'Draft' : (sessionStatus as TestSession['status']),
+      results: multiSummary?.results ?? [buildViewportResult(viewport, issues, null)],
+      ignoredIssueKeys: ignoredKeys,
+      temporaryFixes: styleSessionRef.current.changes,
+      multiViewportSummary: multiSummary ?? undefined,
       viewport,
       orientation,
       scale,
       issues,
-      multiViewportSummary: multiSummary ?? undefined,
     })
-    setSessions(saveSession(session))
-    setStatusMessage('Session saved to localStorage.')
-    setStatusTone('success')
+    try {
+      setSessions(saveSession(session))
+      setSourceCtrl((c) => ({ ...c, message: 'Session saved to localStorage.' }))
+      setStatusTone('success')
+    } catch {
+      setDiagnostics(['Storage unavailable — could not save session.'])
+      setStatusTone('error')
+    }
   }
 
   const handleLoadSession = (id: string) => {
     const session = sessions.find((s) => s.id === id)
     if (!session) return
     setSource(session.source)
-    setViewport(session.viewport)
-    setOrientation(session.orientation)
-    setScale(session.scale)
-    setIssues(session.issues)
+    setSourceCtrl(createInitialSourceState(session.source))
+    setViewport(session.viewport ?? session.selectedViewports[0] ?? PREDEFINED_VIEWPORTS[0])
+    setOrientation(session.orientation ?? 'portrait')
+    setScale(session.scale ?? 0.75)
+    setIssues(session.issues ?? session.results.flatMap((r) => r.issues))
     setMultiSummary(session.multiViewportSummary ?? null)
+    setIgnoredKeys(session.ignoredIssueKeys ?? {})
+    setSessionStatus(session.status)
     setLoadedKey((k) => k + 1)
-    setStatusMessage(`Loaded session “${session.name}”.`)
+    setSourceCtrl((c) => ({
+      ...c,
+      message: `Loaded session “${session.name}”.`,
+      appliedSnapshot: '',
+    }))
     setStatusTone('success')
-  }
-
-  const handleDeleteSession = (id: string) => {
-    setSessions(deleteSession(id))
   }
 
   const captureRendered = async () => {
@@ -533,6 +794,12 @@ export default function App() {
     if (!iframe) return null
     return captureIframeScreenshot(iframe)
   }
+
+  useEffect(() => {
+    const doc = previewRef.current?.getDocument()
+    if (!doc) return
+    setIssues((prev) => (prev.length === 0 ? prev : markStaleIfMissing(prev, doc)))
+  }, [loadedKey, viewport.width, viewport.height])
 
   const workspaceClass = [
     appStyles.workspace,
@@ -547,13 +814,16 @@ export default function App() {
     '--right-width': `${rightWidth}px`,
   } as CSSProperties
 
+  const previewReady = sourceCtrl.state === 'loaded' || sourceCtrl.state === 'blocked'
+
   return (
     <div className={appStyles.appShell}>
       <Toolbar
         onLoad={loadPreview}
-        onRefresh={refreshPreview}
+        onRefresh={loadPreview}
         onRunAnalysis={() => void runAnalysis()}
         onRunAllViewports={() => void runAllViewports()}
+        onCancel={cancelAnalysis}
         onToggleGrid={() => setInspection((s) => ({ ...s, showGrid: !s.showGrid }))}
         onToggleOutline={() => setInspection((s) => ({ ...s, outlineMode: !s.outlineMode }))}
         onToggleRulers={() =>
@@ -569,14 +839,19 @@ export default function App() {
         onExportHtml={() => exportCurrent('html')}
         onToggleLeft={() => setLeftCollapsed((v) => !v)}
         onToggleRight={() => setRightCollapsed((v) => !v)}
+        onToggleAutoAnalyze={() => setAutoAnalyze((v) => !v)}
         gridActive={inspection.showGrid}
         outlineActive={inspection.outlineMode}
         rulersActive={inspection.showRulers}
         spacingActive={inspection.spacingMode}
         comparisonActive={comparisonOpen}
-        loading={frameLoading || analyzing}
+        autoAnalyze={autoAnalyze}
+        loading={sourceCtrl.state === 'loading'}
+        analyzing={analyzing}
         hasPreview={previewReady || loadedKey > 0}
-        hasIssues={issues.length > 0}
+        canExport={sessionStatus === 'Completed' || sessionStatus === 'Completed with errors' || (issues.length > 0 && sessionStatus !== 'Running')}
+        healthScore={issues.length ? health.score : null}
+        scoreLabel={issues.length ? health.label : null}
       />
 
       <div className={workspaceClass} style={workspaceStyle}>
@@ -584,8 +859,10 @@ export default function App() {
           <LeftSidebar
             source={source}
             onSourceChange={patchSource}
+            sourceState={sourceCtrl.state}
+            sourceMessage={sourceCtrl.message}
             viewport={viewport}
-            onViewportChange={setViewport}
+            onViewportChange={handleViewportChange}
             orientation={orientation}
             onOrientationChange={setOrientation}
             scale={scale}
@@ -593,20 +870,22 @@ export default function App() {
             fitToWorkspace={fitToWorkspace}
             onFitToWorkspaceChange={setFitToWorkspace}
             onLoad={loadPreview}
-            errors={inputErrors}
+            errors={sourceCtrl.errors}
             sessions={sessions.map((s) => ({
               id: s.id,
               name: s.name,
               updatedAt: s.updatedAt,
+              status: s.status,
             }))}
             onLoadSession={handleLoadSession}
-            onDeleteSession={handleDeleteSession}
+            onDeleteSession={(id) => setSessions(deleteSession(id))}
             onSaveSession={handleSaveSession}
+            onSwitchToMarkup={() => patchSource({ mode: 'markup' })}
           />
         )}
 
         <div
-          className={`${appStyles.resizeHandle} ${dragRef.current?.side === 'left' ? appStyles.active : ''}`}
+          className={appStyles.resizeHandle}
           onMouseDown={(e) => {
             dragRef.current = { side: 'left', startX: e.clientX, startWidth: leftWidth }
           }}
@@ -616,10 +895,12 @@ export default function App() {
         />
 
         <main className={appStyles.centerStage}>
-          {statusMessage && (
+          {sourceCtrl.message && (
             <div className={`${appStyles.banner} ${appStyles[statusTone]}`} style={{ margin: 8 }}>
-              {frameLoading && <span className={appStyles.loadingPulse} style={{ marginRight: 8 }} />}
-              {statusMessage}
+              {sourceCtrl.state === 'loading' && (
+                <span className={appStyles.loadingPulse} style={{ marginRight: 8 }} />
+              )}
+              {sourceCtrl.message}
             </div>
           )}
 
@@ -635,20 +916,21 @@ export default function App() {
             selectedSelector={selectedSelector}
             onSelectElement={onSelectElement}
             onFrameStatus={handleFrameStatus}
-            />
+          />
 
           <div className={appStyles.statusBar}>
             <span>
               {sourceDisplayName(source)} · {viewport.name} · {viewport.width}×{viewport.height}
-              {orientation === 'landscape' ? ' landscape' : ' portrait'}
+              {orientation === 'landscape' ? ' landscape' : ' portrait'} · session {sessionStatus}
             </span>
             <span>
-              {issues.length} issues
+              {activeCount} active issues
               {selectedSelector ? ` · selected ${selectedSelector}` : ''}
             </span>
             <span>
               Scale {fitToWorkspace ? 'fit' : `${Math.round(scale * 100)}%`}
               {frameAccessible ? ' · analyzable' : loadedKey > 0 ? ' · limited access' : ''}
+              {autoAnalyze ? ' · auto-analyze' : ''}
             </span>
           </div>
         </main>
@@ -667,20 +949,38 @@ export default function App() {
           <RightSidebar
             tab={rightTab}
             onTabChange={setRightTab}
-            issues={issues}
+            issues={sortedIssues}
             selectedIssueId={selectedIssueId}
             onSelectIssue={onSelectIssue}
+            onIgnoreIssue={onIgnoreIssue}
             severityFilter={severityFilter}
             typeFilter={typeFilter}
+            lifecycleFilter={lifecycleFilter}
+            ruleFilter={ruleFilter}
+            sortKey={sortKey}
             onSeverityFilter={setSeverityFilter}
             onTypeFilter={setTypeFilter}
+            onLifecycleFilter={setLifecycleFilter}
+            onRuleFilter={setRuleFilter}
+            onSortKey={setSortKey}
             measurements={measurements}
             onApplyStyles={onApplyStyles}
-            onResetStyles={onResetStyles}
+            onUndo={onUndo}
+            onResetElement={onResetElement}
+            onResetAll={onResetAll}
+            canUndo={canUndo}
+            issueDelta={issueDelta}
+            scoreBefore={scoreBefore}
+            scoreAfter={scoreAfter}
             multiSummary={multiSummary}
             viewportFilter={viewportFilter}
             onViewportFilter={setViewportFilter}
             analyzing={analyzing}
+            progress={progress}
+            healthScore={issues.length ? health.score : null}
+            scoreLabel={issues.length ? health.label : null}
+            activeIssueCount={activeCount}
+            diagnostics={diagnostics}
           />
         )}
       </div>
@@ -690,6 +990,7 @@ export default function App() {
         onClose={() => setComparisonOpen(false)}
         renderedScreenshot={null}
         onCaptureRendered={captureRendered}
+        viewport={viewport}
       />
     </div>
   )

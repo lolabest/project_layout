@@ -76,6 +76,17 @@
   gap: 8px;
 }
 
+.delta {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 12px;
+  display: grid;
+  gap: 6px;
+}
+
 .actions button {
   border: 1px solid var(--border-strong);
   background: var(--bg-panel-elevated);

@@ -1,10 +1,19 @@
-import type { Orientation, PreviewSource, SourceMode, ViewportSize } from '../models/types'
-import { PREDEFINED_VIEWPORTS } from '../models/types'
+import type {
+  Orientation,
+  PreviewSource,
+  SourceMode,
+  SourceState,
+  ViewportSize,
+} from '../models/types'
+import { PREDEFINED_VIEWPORTS, VIEWPORT_LIMITS } from '../models/types'
+import { applyPreset, createCustomViewport, switchOrientation } from '../engine/viewportUtils'
 import styles from './LeftSidebar.module.css'
 
 interface LeftSidebarProps {
   source: PreviewSource
   onSourceChange: (patch: Partial<PreviewSource>) => void
+  sourceState: SourceState
+  sourceMessage: string | null
   viewport: ViewportSize
   onViewportChange: (viewport: ViewportSize) => void
   orientation: Orientation
@@ -15,10 +24,11 @@ interface LeftSidebarProps {
   onFitToWorkspaceChange: (fit: boolean) => void
   onLoad: () => void
   errors: string[]
-  sessions: Array<{ id: string; name: string; updatedAt: string }>
+  sessions: Array<{ id: string; name: string; updatedAt: string; status?: string }>
   onLoadSession: (id: string) => void
   onDeleteSession: (id: string) => void
   onSaveSession: () => void
+  onSwitchToMarkup: () => void
 }
 
 export function LeftSidebar(props: LeftSidebarProps) {
@@ -35,26 +45,16 @@ export function LeftSidebar(props: LeftSidebarProps) {
     onFitToWorkspaceChange,
   } = props
 
-  const setMode = (mode: SourceMode) => onSourceChange({ mode })
-
-  const applyPreset = (preset: ViewportSize) => {
-    if (orientation === 'landscape' && preset.width < preset.height) {
-      onViewportChange({
-        ...preset,
-        id: `${preset.id}-landscape`,
-        name: `${preset.name} Landscape`,
-        width: preset.height,
-        height: preset.width,
-      })
-    } else {
-      onViewportChange({ ...preset })
-    }
+  const setMode = (mode: SourceMode) => {
+    if (mode === 'markup') props.onSwitchToMarkup()
+    else onSourceChange({ mode })
   }
 
   return (
     <aside className={styles.sidebar}>
       <div className={styles.header}>
         <h2>Source & Viewport</h2>
+        <span className={styles.stateBadge}>{props.sourceState}</span>
       </div>
       <div className={styles.body}>
         <div className={styles.segmented}>
@@ -95,8 +95,13 @@ export function LeftSidebar(props: LeftSidebarProps) {
             />
             <p className={styles.hint}>
               External sites may block iframe embedding (X-Frame-Options / CSP). This tool does not
-              bypass browser security. If blocked, paste HTML/CSS instead.
+              bypass browser security. If blocked, switch to HTML/CSS mode.
             </p>
+            {(props.sourceState === 'blocked' || props.sourceState === 'failed') && (
+              <button type="button" className={styles.secondaryBtn} onClick={props.onSwitchToMarkup}>
+                Switch to HTML/CSS mode
+              </button>
+            )}
           </div>
         ) : (
           <>
@@ -123,6 +128,12 @@ export function LeftSidebar(props: LeftSidebarProps) {
           </>
         )}
 
+        {props.sourceMessage && (
+          <p className={styles.hint}>
+            <strong>State:</strong> {props.sourceMessage}
+          </p>
+        )}
+
         {props.errors.length > 0 && (
           <div className={styles.errors} role="alert">
             {props.errors.map((error) => (
@@ -132,7 +143,7 @@ export function LeftSidebar(props: LeftSidebarProps) {
         )}
 
         <button type="button" className={styles.loadBtn} onClick={props.onLoad}>
-          Load Preview
+          {props.sourceState === 'modified' ? 'Apply & Load Preview' : 'Load Preview'}
         </button>
 
         <h3 className={styles.sectionTitle}>Viewport</h3>
@@ -146,7 +157,7 @@ export function LeftSidebar(props: LeftSidebarProps) {
                   ? styles.presetActive
                   : ''
               }
-              onClick={() => applyPreset(preset)}
+              onClick={() => onViewportChange(applyPreset(preset, orientation))}
             >
               {preset.name}
               <span>
@@ -160,40 +171,28 @@ export function LeftSidebar(props: LeftSidebarProps) {
 
         <div className={styles.row}>
           <div className={styles.field}>
-            <label htmlFor="vp-w">Width</label>
+            <label htmlFor="vp-w">Width ({VIEWPORT_LIMITS.minWidth}–{VIEWPORT_LIMITS.maxWidth})</label>
             <input
               id="vp-w"
               type="number"
-              min={200}
-              max={4000}
+              min={VIEWPORT_LIMITS.minWidth}
+              max={VIEWPORT_LIMITS.maxWidth}
               value={viewport.width}
               onChange={(e) =>
-                onViewportChange({
-                  ...viewport,
-                  id: 'custom',
-                  name: 'Custom',
-                  width: Number(e.target.value) || 0,
-                  predefined: false,
-                })
+                onViewportChange(createCustomViewport(Number(e.target.value) || 0, viewport.height))
               }
             />
           </div>
           <div className={styles.field}>
-            <label htmlFor="vp-h">Height</label>
+            <label htmlFor="vp-h">Height ({VIEWPORT_LIMITS.minHeight}–{VIEWPORT_LIMITS.maxHeight})</label>
             <input
               id="vp-h"
               type="number"
-              min={200}
-              max={4000}
+              min={VIEWPORT_LIMITS.minHeight}
+              max={VIEWPORT_LIMITS.maxHeight}
               value={viewport.height}
               onChange={(e) =>
-                onViewportChange({
-                  ...viewport,
-                  id: 'custom',
-                  name: 'Custom',
-                  height: Number(e.target.value) || 0,
-                  predefined: false,
-                })
+                onViewportChange(createCustomViewport(viewport.width, Number(e.target.value) || 0))
               }
             />
           </div>
@@ -204,14 +203,9 @@ export function LeftSidebar(props: LeftSidebarProps) {
             type="button"
             className={orientation === 'portrait' ? styles.active : ''}
             onClick={() => {
-              onOrientationChange('portrait')
-              if (viewport.width > viewport.height) {
-                onViewportChange({
-                  ...viewport,
-                  width: viewport.height,
-                  height: viewport.width,
-                })
-              }
+              const next = switchOrientation(viewport, 'portrait')
+              onOrientationChange(next.orientation)
+              onViewportChange(next.viewport)
             }}
           >
             Portrait
@@ -220,14 +214,9 @@ export function LeftSidebar(props: LeftSidebarProps) {
             type="button"
             className={orientation === 'landscape' ? styles.active : ''}
             onClick={() => {
-              onOrientationChange('landscape')
-              if (viewport.height > viewport.width) {
-                onViewportChange({
-                  ...viewport,
-                  width: viewport.height,
-                  height: viewport.width,
-                })
-              }
+              const next = switchOrientation(viewport, 'landscape')
+              onOrientationChange(next.orientation)
+              onViewportChange(next.viewport)
             }}
           >
             Landscape
@@ -272,7 +261,10 @@ export function LeftSidebar(props: LeftSidebarProps) {
           {props.sessions.map((session) => (
             <li key={session.id}>
               <button type="button" onClick={() => props.onLoadSession(session.id)}>
-                <span>{session.name}</span>
+                <span>
+                  {session.name}
+                  {session.status ? ` · ${session.status}` : ''}
+                </span>
                 <small>{new Date(session.updatedAt).toLocaleString()}</small>
               </button>
               <button

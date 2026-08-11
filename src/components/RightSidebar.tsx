@@ -1,11 +1,14 @@
 import type {
-  DetectedIssue,
   ElementMeasurements,
+  IssueDelta,
+  IssueLifecycle,
   IssueType,
+  LayoutIssue,
   MultiViewportSummary,
   Severity,
 } from '../models/types'
 import { ISSUE_TYPE_LABELS } from '../models/types'
+import type { IssueSortKey } from '../engine/scoring'
 import { ElementInspector } from './ElementInspector'
 import { MultiViewportResults } from './MultiViewportResults'
 import styles from './RightSidebar.module.css'
@@ -15,26 +18,49 @@ type Tab = 'issues' | 'element' | 'results'
 interface RightSidebarProps {
   tab: Tab
   onTabChange: (tab: Tab) => void
-  issues: DetectedIssue[]
+  issues: LayoutIssue[]
   selectedIssueId: string | null
-  onSelectIssue: (issue: DetectedIssue) => void
+  onSelectIssue: (issue: LayoutIssue) => void
+  onIgnoreIssue: (issue: LayoutIssue) => void
   severityFilter: Severity | 'all'
   typeFilter: IssueType | 'all'
+  lifecycleFilter: IssueLifecycle | 'all'
+  ruleFilter: string | 'all'
+  sortKey: IssueSortKey
   onSeverityFilter: (value: Severity | 'all') => void
   onTypeFilter: (value: IssueType | 'all') => void
+  onLifecycleFilter: (value: IssueLifecycle | 'all') => void
+  onRuleFilter: (value: string | 'all') => void
+  onSortKey: (value: IssueSortKey) => void
   measurements: ElementMeasurements | null
   onApplyStyles: (styles: Record<string, string>) => void
-  onResetStyles: () => void
+  onUndo: () => void
+  onResetElement: () => void
+  onResetAll: () => void
+  canUndo: boolean
+  issueDelta: IssueDelta | null
+  scoreBefore: number | null
+  scoreAfter: number | null
   multiSummary: MultiViewportSummary | null
   viewportFilter: string | 'all'
   onViewportFilter: (value: string | 'all') => void
   analyzing: boolean
+  progress: string | null
+  healthScore: number | null
+  scoreLabel: string | null
+  activeIssueCount: number
+  diagnostics: string[]
 }
 
 export function RightSidebar(props: RightSidebarProps) {
+  const rules = Array.from(new Set(props.issues.map((i) => i.ruleId))).sort()
+
   const filtered = props.issues.filter((issue) => {
     if (props.severityFilter !== 'all' && issue.severity !== props.severityFilter) return false
     if (props.typeFilter !== 'all' && issue.type !== props.typeFilter) return false
+    if (props.lifecycleFilter !== 'all' && issue.lifecycle !== props.lifecycleFilter) return false
+    if (props.ruleFilter !== 'all' && issue.ruleId !== props.ruleFilter) return false
+    if (props.viewportFilter !== 'all' && issue.viewport.id !== props.viewportFilter) return false
     return true
   })
 
@@ -46,7 +72,7 @@ export function RightSidebar(props: RightSidebarProps) {
           className={props.tab === 'issues' ? styles.active : ''}
           onClick={() => props.onTabChange('issues')}
         >
-          Issues ({props.issues.length})
+          Issues ({props.activeIssueCount})
         </button>
         <button
           type="button"
@@ -67,6 +93,13 @@ export function RightSidebar(props: RightSidebarProps) {
       <div className={styles.body}>
         {props.tab === 'issues' && (
           <>
+            {props.healthScore !== null && (
+              <div className={styles.scoreBox}>
+                <strong>{props.healthScore}</strong>
+                <span>{props.scoreLabel} · Layout Health Score (not a compliance score)</span>
+              </div>
+            )}
+
             <div className={styles.filters}>
               <label>
                 Severity
@@ -94,11 +127,53 @@ export function RightSidebar(props: RightSidebarProps) {
                   ))}
                 </select>
               </label>
+              <label>
+                Status
+                <select
+                  value={props.lifecycleFilter}
+                  onChange={(e) =>
+                    props.onLifecycleFilter(e.target.value as IssueLifecycle | 'all')
+                  }
+                >
+                  <option value="all">All</option>
+                  <option value="open">Open</option>
+                  <option value="resolved">Resolved</option>
+                  <option value="ignored">Ignored</option>
+                  <option value="stale">Stale</option>
+                </select>
+              </label>
+              <label>
+                Rule
+                <select
+                  value={props.ruleFilter}
+                  onChange={(e) => props.onRuleFilter(e.target.value)}
+                >
+                  <option value="all">All</option>
+                  {rules.map((rule) => (
+                    <option key={rule} value={rule}>
+                      {rule}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Sort
+                <select
+                  value={props.sortKey}
+                  onChange={(e) => props.onSortKey(e.target.value as IssueSortKey)}
+                >
+                  <option value="severity">Severity + DOM</option>
+                  <option value="dom">DOM order</option>
+                  <option value="viewport">Viewport</option>
+                  <option value="rule">Rule</option>
+                  <option value="newest">Newest</option>
+                </select>
+              </label>
             </div>
 
             {props.analyzing && (
               <div className={styles.status}>
-                <span className={styles.pulse} /> Analyzing layout…
+                <span className={styles.pulse} /> {props.progress ?? 'Analyzing layout…'}
               </div>
             )}
 
@@ -122,17 +197,50 @@ export function RightSidebar(props: RightSidebarProps) {
                       <span className={`${styles.sev} ${styles[issue.severity]}`}>
                         {issue.severity}
                       </span>
-                      <span className={styles.type}>{ISSUE_TYPE_LABELS[issue.type]}</span>
+                      <span className={styles.type}>{issue.title}</span>
+                      <span className={styles.life}>{issue.lifecycle}</span>
                     </div>
                     <code className={styles.selector}>{issue.selector}</code>
-                    <p>{issue.explanation}</p>
+                    <div className={styles.path}>{issue.elementPath}</div>
+                    <p>{issue.description}</p>
                     <p className={styles.fix}>
                       <strong>Fix:</strong> {issue.recommendation}
                     </p>
+                    <div className={styles.meta}>
+                      {issue.viewport.name} · confidence {Math.round(issue.confidence * 100)}%
+                      {issue.affectedViewports && issue.affectedViewports.length > 1
+                        ? ` · ${issue.affectedViewports.length} viewports`
+                        : ''}
+                    </div>
                   </button>
+                  {issue.lifecycle === 'open' && (
+                    <button
+                      type="button"
+                      className={styles.ignoreBtn}
+                      onClick={() => props.onIgnoreIssue(issue)}
+                    >
+                      Ignore
+                    </button>
+                  )}
+                  {issue.lifecycle === 'stale' && (
+                    <div className={styles.staleNote}>
+                      Element no longer found — rerun analysis to refresh.
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
+
+            {props.diagnostics.length > 0 && (
+              <details className={styles.diagnostics}>
+                <summary>Diagnostics</summary>
+                <ul>
+                  {props.diagnostics.map((d) => (
+                    <li key={d}>{d}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </>
         )}
 
@@ -140,7 +248,13 @@ export function RightSidebar(props: RightSidebarProps) {
           <ElementInspector
             measurements={props.measurements}
             onApplyStyles={props.onApplyStyles}
-            onResetStyles={props.onResetStyles}
+            onUndo={props.onUndo}
+            onResetElement={props.onResetElement}
+            onResetAll={props.onResetAll}
+            canUndo={props.canUndo}
+            issueDelta={props.issueDelta}
+            scoreBefore={props.scoreBefore}
+            scoreAfter={props.scoreAfter}
           />
         )}
 

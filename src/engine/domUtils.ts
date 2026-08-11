@@ -1,65 +1,12 @@
 import type { BoxSides } from '../models/types'
 
+export { getCssSelector, getElementPath, buildIssueKey } from './selectors'
+
 function cssEscape(value: string): string {
   if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
     return CSS.escape(value)
   }
   return value.replace(/([^\w-])/g, '\\$1')
-}
-
-/** Generate a reasonably unique CSS selector for an element. */
-export function getCssSelector(element: Element): string {
-  if (element.id) {
-    const idSelector = `#${cssEscape(element.id)}`
-    try {
-      if (element.ownerDocument.querySelectorAll(idSelector).length === 1) {
-        return idSelector
-      }
-    } catch {
-      /* ignore invalid id */
-    }
-  }
-
-  const parts: string[] = []
-  let current: Element | null = element
-
-  while (current && current.nodeType === Node.ELEMENT_NODE) {
-    const tag = current.tagName.toLowerCase()
-    if (tag === 'html') {
-      parts.unshift('html')
-      break
-    }
-    if (tag === 'body') {
-      parts.unshift('body')
-      break
-    }
-
-    let part = tag
-    if (current.classList.length > 0) {
-      const classes = Array.from(current.classList)
-        .slice(0, 2)
-        .map((c) => `.${cssEscape(c)}`)
-        .join('')
-      part += classes
-    }
-
-    const parentEl: Element | null = current.parentElement
-    if (parentEl) {
-      const siblings = Array.from(parentEl.children).filter(
-        (child: Element) => child.tagName === current!.tagName,
-      )
-      if (siblings.length > 1) {
-        const index = siblings.indexOf(current) + 1
-        part += `:nth-of-type(${index})`
-      }
-    }
-
-    parts.unshift(part)
-    current = parentEl
-    if (parts.length >= 5) break
-  }
-
-  return parts.join(' > ')
 }
 
 export function parsePx(value: string): number {
@@ -69,8 +16,16 @@ export function parsePx(value: string): number {
 
 export function getBoxSides(
   style: CSSStyleDeclaration,
-  prefix: 'margin' | 'padding',
+  prefix: 'margin' | 'padding' | 'border',
 ): BoxSides {
+  if (prefix === 'border') {
+    return {
+      top: parsePx(style.borderTopWidth),
+      right: parsePx(style.borderRightWidth),
+      bottom: parsePx(style.borderBottomWidth),
+      left: parsePx(style.borderLeftWidth),
+    }
+  }
   return {
     top: parsePx(style.getPropertyValue(`${prefix}-top`)),
     right: parsePx(style.getPropertyValue(`${prefix}-right`)),
@@ -103,3 +58,33 @@ export function createId(prefix = 'id'): string {
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
+
+export function getAccessibleName(element: Element): string {
+  const ariaLabel = element.getAttribute('aria-label')?.trim()
+  if (ariaLabel) return ariaLabel
+
+  const labelledBy = element.getAttribute('aria-labelledby')?.trim()
+  if (labelledBy && element.ownerDocument) {
+    const parts = labelledBy
+      .split(/\s+/)
+      .map((id) => element.ownerDocument!.getElementById(id)?.textContent?.trim() ?? '')
+      .filter(Boolean)
+    if (parts.length) return parts.join(' ')
+  }
+
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    if (element.labels && element.labels.length > 0) {
+      return Array.from(element.labels)
+        .map((l) => l.textContent?.trim() ?? '')
+        .filter(Boolean)
+        .join(' ')
+    }
+  }
+
+  const text = element.textContent?.trim()
+  if (text) return text
+  if (element instanceof HTMLImageElement) return element.alt || ''
+  return element.getAttribute('title')?.trim() ?? ''
+}
+
+void cssEscape

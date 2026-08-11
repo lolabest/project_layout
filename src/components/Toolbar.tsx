@@ -5,6 +5,7 @@ interface ToolbarProps {
   onRefresh: () => void
   onRunAnalysis: () => void
   onRunAllViewports: () => void
+  onCancel: () => void
   onToggleGrid: () => void
   onToggleOutline: () => void
   onToggleRulers: () => void
@@ -14,14 +15,19 @@ interface ToolbarProps {
   onExportHtml: () => void
   onToggleLeft: () => void
   onToggleRight: () => void
+  onToggleAutoAnalyze: () => void
   gridActive: boolean
   outlineActive: boolean
   rulersActive: boolean
   spacingActive: boolean
   comparisonActive: boolean
+  autoAnalyze: boolean
   loading: boolean
+  analyzing: boolean
   hasPreview: boolean
-  hasIssues: boolean
+  canExport: boolean
+  healthScore: number | null
+  scoreLabel: string | null
 }
 
 export function Toolbar(props: ToolbarProps) {
@@ -51,7 +57,7 @@ export function Toolbar(props: ToolbarProps) {
           type="button"
           className={styles.btn}
           onClick={props.onRunAnalysis}
-          disabled={!props.hasPreview || props.loading}
+          disabled={!props.hasPreview || props.loading || props.analyzing}
         >
           Analyze Layout
         </button>
@@ -59,9 +65,17 @@ export function Toolbar(props: ToolbarProps) {
           type="button"
           className={styles.btn}
           onClick={props.onRunAllViewports}
-          disabled={!props.hasPreview || props.loading}
+          disabled={!props.hasPreview || props.loading || props.analyzing}
         >
           Run All Viewports
+        </button>
+        <button
+          type="button"
+          className={styles.btn}
+          onClick={props.onCancel}
+          disabled={!props.analyzing}
+        >
+          Cancel
         </button>
       </div>
 
@@ -106,14 +120,28 @@ export function Toolbar(props: ToolbarProps) {
         >
           Compare
         </button>
+        <button
+          type="button"
+          className={`${styles.btn} ${props.autoAnalyze ? styles.active : ''}`}
+          onClick={props.onToggleAutoAnalyze}
+          aria-pressed={props.autoAnalyze}
+          title="Automatically re-analyse when the viewport changes"
+        >
+          Auto-analyze
+        </button>
       </div>
 
       <div className={styles.group}>
+        {props.healthScore !== null && (
+          <span className={styles.score} title="Layout Health Score — not a formal a11y compliance score">
+            Score {props.healthScore} · {props.scoreLabel}
+          </span>
+        )}
         <button
           type="button"
           className={styles.btn}
           onClick={props.onExportJson}
-          disabled={!props.hasIssues}
+          disabled={!props.canExport}
         >
           Export JSON
         </button>
@@ -121,7 +149,7 @@ export function Toolbar(props: ToolbarProps) {
           type="button"
           className={styles.btn}
           onClick={props.onExportHtml}
-          disabled={!props.hasIssues}
+          disabled={!props.canExport}
         >
           Export HTML
         </button>
