@@ -14,7 +14,7 @@ import {
 } from './reports'
 import { applyTemporaryStyles, createStyleEditSession, undoLastChange } from './measurements'
 import { computeIssueDelta, applyIgnoredState, ignoreIssue } from './issueLifecycle'
-import { PREDEFINED_VIEWPORTS } from '../models/types'
+import { MOBILE_VIEWPORT, PREDEFINED_VIEWPORTS } from '../models/types'
 
 const SAMPLE = buildSrcDoc(
   `<div class="wrap"><img src="missing.png" /><a href="#">Go</a><button class="tiny">x</button></div>`,
@@ -34,7 +34,7 @@ describe('integration flows', () => {
     }
     expect(validateSource(source).valid).toBe(true)
     const doc = new DOMParser().parseFromString(SAMPLE, 'text/html')
-    const result = analyzeDocument(doc, { viewport: PREDEFINED_VIEWPORTS[0] })
+    const result = analyzeDocument(doc, { viewport: MOBILE_VIEWPORT })
     expect(result.issues.length).toBeGreaterThan(0)
     expect(result.healthScore?.score).toBeLessThan(100)
   })
@@ -67,35 +67,35 @@ describe('integration flows', () => {
 
   it('issue selection delta and ignore persist across re-analysis identity', () => {
     const doc = new DOMParser().parseFromString(SAMPLE, 'text/html')
-    const first = analyzeDocument(doc, { viewport: PREDEFINED_VIEWPORTS[0] }).issues
-    const second = analyzeDocument(doc, { viewport: PREDEFINED_VIEWPORTS[0] }).issues
+    const first = analyzeDocument(doc, { viewport: MOBILE_VIEWPORT }).issues
+    const second = analyzeDocument(doc, { viewport: MOBILE_VIEWPORT }).issues
     const delta = computeIssueDelta(first, second)
     expect(delta.unchanged.length).toBeGreaterThan(0)
-    const ignored = ignoreIssue(first, first[0].id, 'n/a')
+    const ignored = ignoreIssue(first, first[0]!.id, 'n/a')
     const applied = applyIgnoredState(second, ignored.ignoredKeys)
     expect(applied.some((i) => i.lifecycle === 'ignored')).toBe(true)
   })
 
   it('session restoration and export', () => {
     const doc = new DOMParser().parseFromString(SAMPLE, 'text/html')
-    const issues = analyzeDocument(doc, { viewport: PREDEFINED_VIEWPORTS[0] }).issues
+    const issues = analyzeDocument(doc, { viewport: MOBILE_VIEWPORT }).issues
     const report = createReport({
       sourceName: 'Sample',
       sourceMode: 'markup',
-      viewport: PREDEFINED_VIEWPORTS[0],
+      viewport: MOBILE_VIEWPORT,
       issues,
     })
     const session = createSession({
       name: 'Sample',
       source: { mode: 'markup', url: '', html: '<div/>', css: '', name: 'Sample' },
-      selectedViewports: [PREDEFINED_VIEWPORTS[0]],
+      selectedViewports: [MOBILE_VIEWPORT],
       status: 'Completed',
       issues,
       report,
     })
     saveSession(session)
     const restored = loadSessions()[0]
-    expect(restored.name).toBe('Sample')
+    expect(restored!.name).toBe('Sample')
     expect(exportReportJson(report)).toContain('Sample')
     expect(exportReportHtml(report)).toContain('Grouped Issues')
   })

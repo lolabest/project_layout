@@ -10,7 +10,7 @@ import { LeftSidebar } from './components/LeftSidebar'
 import { RightSidebar } from './components/RightSidebar'
 import { PreviewFrame, type PreviewFrameHandle } from './components/PreviewFrame'
 import { ComparisonPanel } from './components/ComparisonPanel'
-import { analyzeDocument, countBySeverity } from './engine/analyzer'
+import { countBySeverity } from './engine/analyzer'
 import {
   applyTemporaryStyles,
   createStyleEditSession,
@@ -23,19 +23,10 @@ import {
 import { captureIframeScreenshot } from './engine/screenshot'
 import {
   buildViewportResult,
-  createReport,
   createSession,
-  deleteSession,
-  downloadTextFile,
-  exportReportHtml,
-  exportReportJson,
-  finalizeSessionStatus,
   loadSessions,
-  saveSession,
-  summarizeMultiViewport,
 } from './engine/reports'
 import { sourceDisplayName } from './engine/validation'
-import { waitForLayoutStabilization, createAnalysisController } from './engine/stabilize'
 import {
   beginSourceLoad,
   canAnalyzeStrict,
@@ -44,16 +35,15 @@ import {
   markSourceEdited,
 } from './engine/sourceState'
 import {
-  applyIgnoredState,
   computeIssueDelta,
   countActiveIssues,
-  ignoreIssue,
   markStaleIfMissing,
 } from './engine/issueLifecycle'
 import { calculateHealthScore, sortIssues, type IssueSortKey } from './engine/scoring'
 import { validateViewportDimensions } from './engine/viewportUtils'
+import { analysisApp } from './application/AnalysisApplicationService'
+import { diagnosticLogger } from './application/diagnostics'
 import type {
-  AppError,
   ElementMeasurements,
   InspectionSettings,
   IssueDelta,
@@ -67,7 +57,7 @@ import type {
   TestSession,
   ViewportSize,
 } from './models/types'
-import { PREDEFINED_VIEWPORTS } from './models/types'
+import { MOBILE_VIEWPORT } from './models/types'
 import appStyles from './styles/App.module.css'
 import './styles/global.css'
 
@@ -154,9 +144,9 @@ export default function App() {
   const previewRef = useRef<PreviewFrameHandle>(null)
   const selectedElementRef = useRef<HTMLElement | null>(null)
   const styleSessionRef = useRef<StyleEditSession>(createStyleEditSession())
-  const analysisRef = useRef<ReturnType<typeof createAnalysisController> | null>(null)
   const viewportDebounceRef = useRef<number | null>(null)
-  const runningSessionRef = useRef(false)
+  const [coveragePercent, setCoveragePercent] = useState<number | null>(null)
+  const [coverageWarning, setCoverageWarning] = useState<string | null>(null)
 
   const [source, setSource] = useState<PreviewSource>({
     mode: 'markup',
@@ -175,7 +165,7 @@ export default function App() {
     }),
   )
 
-  const [viewport, setViewport] = useState<ViewportSize>(PREDEFINED_VIEWPORTS[0])
+  const [viewport, setViewport] = useState<ViewportSize>(MOBILE_VIEWPORT)
   const [orientation, setOrientation] = useState<Orientation>('portrait')
   const [scale, setScale] = useState(0.75)
   const [fitToWorkspace, setFitToWorkspace] = useState(true)
@@ -221,7 +211,10 @@ export default function App() {
   const [rightWidth, setRightWidth] = useState(360)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
-  const [sessions, setSessions] = useState<TestSession[]>(() => loadSessions())
+  const [sessions, setSessions] = useState<TestSession[]>(() => {
+    const listed = analysisApp.listSessions()
+    return listed.ok ? listed.value : loadSessions()
+  })
   const [statusTone, setStatusTone] = useState<'info' | 'error' | 'warning' | 'success'>('info')
 
   const dragRef = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(
@@ -289,12 +282,14 @@ export default function App() {
   )
 
   const cancelAnalysis = () => {
-    analysisRef.current?.cancel()
-    runningSessionRef.current = false
+    const result = analysisApp.cancelAnalysisSession()
     setAnalyzing(false)
     setProgress(null)
-    setSessionStatus('Failed')
-    setSourceCtrl((c) => ({ ...c, message: 'Analysis cancelled.' }))
+    setSessionStatus(result.ok ? 'Cancelled' : 'Failed')
+    setSourceCtrl((c) => ({
+      ...c,
+      message: result.ok ? 'Analysis cancelled.' : result.error.message,
+    }))
     setStatusTone('warning')
   }
 
@@ -318,31 +313,46 @@ export default function App() {
     setStatusTone('info')
   }
 
-  const runAnalysisForDoc = async (
-    doc: Document,
-    vp: ViewportSize,
-    signal?: AbortSignal,
-  ) => {
-    const stable = await waitForLayoutStabilization(doc, { signal, timeoutMs: 5000 })
-    const result = analyzeDocument(doc, { viewport: vp, signal })
-    const withIgnored = applyIgnoredState(result.issues, ignoredKeys)
+  const runAnalysisForDoc = async (doc: Document, vp: ViewportSize) => {
+    analysisApp.createAnalysisSession(source, [vp])
+    const result = await analysisApp.runActiveViewportAnalysis({
+      document: doc,
+      viewport: vp,
+      preview: {
+        loaded: sourceCtrl.state === 'loaded' || sourceCtrl.state === 'blocked',
+        blocked: sourceCtrl.state === 'blocked',
+        accessible: frameAccessible,
+      },
+      ignoredKeys,
+    })
+    if (!result.ok) {
+      return {
+        issues: [] as LayoutIssue[],
+        diagnostics: [`${result.error.message} — ${result.error.nextAction}`],
+        health: null,
+        coverage: null as null | { percent: number; warning: string | null },
+      }
+    }
     const diag = [
-      ...(result.ruleErrors ?? []).map((e: AppError) => `${e.message}${e.diagnostic ? ` (${e.diagnostic})` : ''}`),
-      ...(stable.timedOut ? ['Layout stabilization timed out — analysis continued with available content.'] : []),
-      ...(result.truncated ? [result.errorMessage ?? 'Element sampling truncated for performance.'] : []),
+      ...result.value.engine.executions
+        .filter((e) => e.status === 'skipped' || e.status === 'failed')
+        .map((e) =>
+          e.status === 'skipped'
+            ? `Skipped ${e.ruleId}: ${e.skipReason ?? 'n/a'}`
+            : `Failed ${e.ruleId}: ${e.diagnostic ?? 'error'}`,
+        ),
+      ...result.value.engine.truncatedWarnings,
+      ...diagnosticLogger.summary().slice(-8),
     ]
-    return { issues: withIgnored, diagnostics: diag, health: result.healthScore }
+    return {
+      issues: result.value.issues,
+      diagnostics: diag,
+      health: result.value.engine.score,
+      coverage: result.value.engine.coverage,
+    }
   }
 
   const runAnalysis = async () => {
-    if (runningSessionRef.current) {
-      setSourceCtrl((c) => ({
-        ...c,
-        message: 'A test session is already running. Cancel it before starting another.',
-      }))
-      setStatusTone('warning')
-      return
-    }
     if (!canAnalyzeStrict(sourceCtrl.state, frameAccessible)) {
       setSourceCtrl((c) => ({
         ...c,
@@ -363,54 +373,29 @@ export default function App() {
       return
     }
 
-    const controller = createAnalysisController()
-    analysisRef.current = controller
-    runningSessionRef.current = true
     setAnalyzing(true)
-    setProgress('Stabilizing layout…')
+    setProgress('Stabilizing layout & running rules…')
     setSessionStatus('Running')
     setStatusTone('info')
 
-    try {
-      const { issues: nextIssues, diagnostics: diag } = await runAnalysisForDoc(
-        doc,
-        viewport,
-        controller.controller.signal,
-      )
-      if (controller.isStale()) return
-      setIssues(nextIssues)
-      setDiagnostics(diag)
-      setRightTab('issues')
-      const counts = countBySeverity(nextIssues)
-      setSourceCtrl((c) => ({
-        ...c,
-        message: `Analysis complete: ${countActiveIssues(nextIssues)} active issues (${counts.critical} critical, ${counts.warning} warnings, ${counts.info} info).`,
-      }))
-      setStatusTone(counts.critical > 0 ? 'warning' : 'success')
-      setSessionStatus('Completed')
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return
-      setDiagnostics([error instanceof Error ? error.message : 'Analysis failed'])
-      setSessionStatus('Failed')
-      setStatusTone('error')
-      setSourceCtrl((c) => ({ ...c, message: 'Analysis failed. See diagnostics for details.' }))
-    } finally {
-      runningSessionRef.current = false
-      setAnalyzing(false)
-      setProgress(null)
-      analysisRef.current = null
-    }
+    const { issues: nextIssues, diagnostics: diag, coverage } = await runAnalysisForDoc(doc, viewport)
+    setIssues(nextIssues)
+    setDiagnostics(diag)
+    setCoveragePercent(coverage?.percent ?? null)
+    setCoverageWarning(coverage?.warning ?? null)
+    setRightTab('issues')
+    const counts = countBySeverity(nextIssues)
+    setSourceCtrl((c) => ({
+      ...c,
+      message: `Analysis complete: ${countActiveIssues(nextIssues)} active issues (${counts.critical} critical, ${counts.warning} warnings, ${counts.info} info). Coverage ${coverage?.percent ?? '—'}%.`,
+    }))
+    setStatusTone(counts.critical > 0 || coverage?.warning ? 'warning' : 'success')
+    setSessionStatus('Completed')
+    setAnalyzing(false)
+    setProgress(null)
   }
 
   const runAllViewports = async () => {
-    if (runningSessionRef.current) {
-      setSourceCtrl((c) => ({
-        ...c,
-        message: 'A test session is already running. Cancel it before starting another.',
-      }))
-      setStatusTone('warning')
-      return
-    }
     if (sourceCtrl.state !== 'loaded' && sourceCtrl.state !== 'blocked') {
       setSourceCtrl((c) => ({ ...c, message: 'Load a valid preview before running all viewports.' }))
       setStatusTone('error')
@@ -426,25 +411,26 @@ export default function App() {
       return
     }
 
-    const controller = createAnalysisController()
-    analysisRef.current = controller
-    runningSessionRef.current = true
     setAnalyzing(true)
     setSessionStatus('Running')
     setStatusTone('info')
-
+    setProgress('Running all viewports…')
     const previous = viewport
-    const results = []
-    const allDiag: string[] = []
 
-    try {
-      for (let i = 0; i < PREDEFINED_VIEWPORTS.length; i++) {
-        if (controller.isStale()) break
-        const vp = PREDEFINED_VIEWPORTS[i]
+    const result = await analysisApp.runAllViewportsAnalysis({
+      source,
+      ignoredKeys,
+      preview: {
+        loaded: true,
+        blocked: sourceCtrl.state === 'blocked',
+        accessible: frameAccessible,
+      },
+      setViewport: (vp) => {
         setViewport(vp)
-        setProgress(`Testing ${vp.name} (${i + 1}/${PREDEFINED_VIEWPORTS.length})…`)
-        await new Promise((r) => setTimeout(r, 120))
-
+        setProgress(`Testing ${vp.name}…`)
+      },
+      getDocument: () => previewRef.current?.getDocument() ?? null,
+      reloadPreview: async () => {
         if (source.mode === 'markup') {
           setLoadedKey((k) => k + 1)
           await new Promise<void>((resolve) => {
@@ -462,92 +448,47 @@ export default function App() {
         } else {
           await new Promise((r) => setTimeout(r, 250))
         }
-
+      },
+      captureScreenshot: async () => {
         const iframe = previewRef.current?.getIframe()
-        const doc = previewRef.current?.getDocument()
-        if (!doc || !iframe || controller.isStale()) {
-          results.push(buildViewportResult(vp, [], null, 'failed', 'Preview unavailable'))
-          continue
-        }
+        if (!iframe) return null
+        return captureIframeScreenshot(iframe)
+      },
+    })
 
-        try {
-          const { issues: vpIssues, diagnostics: diag } = await runAnalysisForDoc(
-            doc,
-            vp,
-            controller.controller.signal,
-          )
-          allDiag.push(...diag.map((d) => `[${vp.name}] ${d}`))
-          const shot = await captureIframeScreenshot(iframe)
-          results.push(buildViewportResult(vp, vpIssues, shot, 'success'))
-        } catch (error) {
-          if (error instanceof DOMException && error.name === 'AbortError') break
-          results.push(
-            buildViewportResult(
-              vp,
-              [],
-              null,
-              'failed',
-              error instanceof Error ? error.message : 'Viewport analysis failed',
-            ),
-          )
-        }
-      }
+    setViewport(previous)
+    setAnalyzing(false)
+    setProgress(null)
 
-      if (controller.isStale()) {
-        setSessionStatus('Failed')
-        return
-      }
-
-      setViewport(previous)
-      const summary = summarizeMultiViewport(sourceDisplayName(source), results)
-      setMultiSummary(summary)
-      const flat = applyIgnoredState(
-        results.flatMap((r) => r.issues),
-        ignoredKeys,
-      )
-      setIssues(flat)
-      setDiagnostics(allDiag)
-      setAnalyzing(false)
-      setRightTab('results')
-      const status = finalizeSessionStatus(results)
-      setSessionStatus(status)
-      setSourceCtrl((c) => ({
-        ...c,
-        message: `All viewports finished (${status}): ${summary.totalIssues} grouped issues, score ${summary.overallHealthScore}.`,
-      }))
-      setStatusTone(status === 'Failed' ? 'error' : summary.totalCritical > 0 ? 'warning' : 'success')
-
-      const session = createSession({
-        name: sourceDisplayName(source),
-        source,
-        selectedViewports: PREDEFINED_VIEWPORTS,
-        status,
-        results,
-        ignoredIssueKeys: ignoredKeys,
-        temporaryFixes: styleSessionRef.current.changes,
-        multiViewportSummary: summary,
-        viewport: previous,
-        orientation,
-        scale,
-        issues: flat,
-        report: createReport({
-          sourceName: sourceDisplayName(source),
-          sourceMode: source.mode,
-          sourceUrl: source.mode === 'url' ? source.url : undefined,
-          viewport: previous,
-          viewports: PREDEFINED_VIEWPORTS,
-          issues: flat,
-          screenshots: results.map((r) => r.screenshotDataUrl).filter(Boolean) as string[],
-          temporaryFixes: styleSessionRef.current.changes,
-        }),
-      })
-      setSessions(saveSession(session))
-    } finally {
-      runningSessionRef.current = false
-      setAnalyzing(false)
-      setProgress(null)
-      analysisRef.current = null
+    if (!result.ok) {
+      setSessionStatus('Failed')
+      setSourceCtrl((c) => ({ ...c, message: `${result.error.message} — ${result.error.nextAction}` }))
+      setStatusTone('error')
+      setDiagnostics([result.error.diagnostic])
+      return
     }
+
+    setMultiSummary(result.value.summary)
+    setIssues(result.value.issues)
+    setCoveragePercent(null)
+    setDiagnostics(diagnosticLogger.summary())
+    setRightTab('results')
+    setSessionStatus(result.value.sessionStatus)
+    setSessions((prev) => {
+      const saved = analysisApp.saveSession(result.value.session)
+      return saved.ok ? saved.value : prev
+    })
+    setSourceCtrl((c) => ({
+      ...c,
+      message: `All viewports finished (${result.value.sessionStatus}): ${result.value.summary.totalIssues} grouped issues, score ${result.value.summary.overallHealthScore}.`,
+    }))
+    setStatusTone(
+      result.value.sessionStatus === 'Failed'
+        ? 'error'
+        : result.value.summary.totalCritical > 0
+          ? 'warning'
+          : 'success',
+    )
   }
 
   // Debounced viewport change → optional auto-analyze
@@ -609,9 +550,13 @@ export default function App() {
 
   const onIgnoreIssue = (issue: LayoutIssue) => {
     const reason = window.prompt('Optional reason for ignoring this issue:', '') ?? ''
-    const result = ignoreIssue(issues, issue.id, reason)
-    setIssues(result.issues)
-    setIgnoredKeys((prev) => ({ ...prev, ...result.ignoredKeys }))
+    const result = analysisApp.ignoreIssue(issues, issue.id, reason)
+    if (!result.ok) {
+      setDiagnostics([result.error.message])
+      return
+    }
+    setIssues(result.value.issues)
+    setIgnoredKeys(result.value.ignoredKeys)
   }
 
   const onSelectElement = (selector: string | null, element: Element | null) => {
@@ -679,66 +624,41 @@ export default function App() {
   }
 
   const exportCurrent = (format: 'json' | 'html') => {
-    if (sessionStatus === 'Draft' || sessionStatus === 'Running') {
+    const result = analysisApp.generateReport({
+      source,
+      viewport,
+      issues,
+      format,
+      sessionStatus,
+    })
+    if (!result.ok) {
       setSourceCtrl((c) => ({
         ...c,
-        message: 'Export is available for completed or partially completed sessions. Run a test first.',
+        message: `${result.error.message} — ${result.error.nextAction}`,
       }))
       setStatusTone('warning')
+      setDiagnostics([result.error.diagnostic])
       return
     }
-    const report = createReport({
-      sourceName: sourceDisplayName(source),
-      sourceMode: source.mode,
-      sourceUrl: source.mode === 'url' ? source.url : undefined,
-      viewport,
-      viewports: multiSummary?.results.map((r) => r.viewport) ?? [viewport],
-      issues,
-      screenshots:
-        (multiSummary?.results.map((r) => r.screenshotDataUrl).filter(Boolean) as string[]) ?? [],
-      temporaryFixes: styleSessionRef.current.changes,
-      measurements,
-    })
-
-    try {
-      if (format === 'json') {
-        downloadTextFile(
-          `layout-report-${report.id}.json`,
-          exportReportJson(report),
-          'application/json',
-        )
-      } else {
-        downloadTextFile(`layout-report-${report.id}.html`, exportReportHtml(report), 'text/html')
-      }
-    } catch (error) {
-      setDiagnostics([
-        `Export failed: ${error instanceof Error ? error.message : 'unknown error'}`,
-      ])
-      setStatusTone('error')
-      return
-    }
-
     const session = createSession({
       name: sourceDisplayName(source),
       source,
       selectedViewports: multiSummary?.results.map((r) => r.viewport) ?? [viewport],
       status: sessionStatus === 'Failed' ? 'Failed' : 'Completed',
-      results: multiSummary?.results ?? [
-        buildViewportResult(viewport, issues, null, 'success'),
-      ],
+      results: multiSummary?.results ?? [buildViewportResult(viewport, issues, null, 'success')],
       ignoredIssueKeys: ignoredKeys,
       temporaryFixes: styleSessionRef.current.changes,
-      report,
       multiViewportSummary: multiSummary ?? undefined,
       viewport,
       orientation,
       scale,
       issues,
     })
-    setSessions(saveSession(session))
+    const saved = analysisApp.saveSession(session)
+    if (saved.ok) setSessions(saved.value)
     setSourceCtrl((c) => ({
       ...c,
-      message: `Report exported as ${format.toUpperCase()} and session saved.`,
+      message: `Report exported (${result.value.filename}) and session saved.`,
     }))
     setStatusTone('success')
   }
@@ -758,14 +678,15 @@ export default function App() {
       scale,
       issues,
     })
-    try {
-      setSessions(saveSession(session))
-      setSourceCtrl((c) => ({ ...c, message: 'Session saved to localStorage.' }))
-      setStatusTone('success')
-    } catch {
-      setDiagnostics(['Storage unavailable — could not save session.'])
+    const saved = analysisApp.saveSession(session)
+    if (!saved.ok) {
+      setDiagnostics([saved.error.message])
       setStatusTone('error')
+      return
     }
+    setSessions(saved.value)
+    setSourceCtrl((c) => ({ ...c, message: 'Session saved to localStorage.' }))
+    setStatusTone('success')
   }
 
   const handleLoadSession = (id: string) => {
@@ -773,7 +694,7 @@ export default function App() {
     if (!session) return
     setSource(session.source)
     setSourceCtrl(createInitialSourceState(session.source))
-    setViewport(session.viewport ?? session.selectedViewports[0] ?? PREDEFINED_VIEWPORTS[0])
+    setViewport(session.viewport ?? session.selectedViewports[0] ?? MOBILE_VIEWPORT)
     setOrientation(session.orientation ?? 'portrait')
     setScale(session.scale ?? 0.75)
     setIssues(session.issues ?? session.results.flatMap((r) => r.issues))
@@ -878,7 +799,10 @@ export default function App() {
               status: s.status,
             }))}
             onLoadSession={handleLoadSession}
-            onDeleteSession={(id) => setSessions(deleteSession(id))}
+            onDeleteSession={(id) => {
+              const deleted = analysisApp.deleteSession(id)
+              if (deleted.ok) setSessions(deleted.value)
+            }}
             onSaveSession={handleSaveSession}
             onSwitchToMarkup={() => patchSource({ mode: 'markup' })}
           />
@@ -895,12 +819,18 @@ export default function App() {
         />
 
         <main className={appStyles.centerStage}>
-          {sourceCtrl.message && (
+          {(sourceCtrl.message || coverageWarning) && (
             <div className={`${appStyles.banner} ${appStyles[statusTone]}`} style={{ margin: 8 }}>
               {sourceCtrl.state === 'loading' && (
                 <span className={appStyles.loadingPulse} style={{ marginRight: 8 }} />
               )}
               {sourceCtrl.message}
+              {coveragePercent !== null && (
+                <div style={{ marginTop: 4 }}>
+                  Analysis coverage: {coveragePercent}%
+                  {coverageWarning ? ` — ${coverageWarning}` : ''}
+                </div>
+              )}
             </div>
           )}
 

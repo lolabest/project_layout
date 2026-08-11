@@ -24,28 +24,20 @@ Open the local URL printed by Vite (usually `http://localhost:5173`).
 
 ## Architecture
 
+Layered design (see `ARCHITECTURE.md`):
+
 ```
 src/
-  models/types.ts          Typed models (sessions, viewports, LayoutIssue, reports)
-  engine/
-    analyzer.ts            LayoutAnalyzer service + detection rules
-    selectors.ts           Stable CSS selectors + DOM paths
-    viewportUtils.ts       Viewport validation / orientation
-    stabilize.ts           Font/image/rAF layout stabilization
-    scoring.ts             Layout Health Score + sorting
-    issueLifecycle.ts      Ignore / stale / delta / cross-viewport grouping
-    sourceState.ts         Source state machine
-    measurements.ts        Box-model measurement + CSS edit session
-    validation.ts          URL/markup validation + srcdoc builder
-    comparison.ts          Reference vs rendered image diff
-    screenshot.ts          Same-origin iframe capture (html2canvas)
-    reports.ts             JSON/HTML export + localStorage sessions
-  components/              DevTools-style UI (toolbar, sidebars, preview)
-  styles/                  Global theme + CSS modules
-  App.tsx                  Application wiring
+  domain/           State machines, Result/Error, scoring, fingerprint, coverage
+  application/      AnalysisApplicationService use cases + diagnostics
+  infrastructure/   LayoutRuleEngine, RuleRegistry, builtin rules, session repo
+  engine/           Shared helpers + compatibility facades
+  models/           UI-facing typed models
+  components/       Presentation (no scoring/detection/persistence)
+  App.tsx           Presentation wiring → application layer
 ```
 
-The **LayoutAnalyzer** is independent of React. UI calls into `engine/*`; rules are unit-tested without mounting components.
+Docs: `ARCHITECTURE.md`, `BUSINESS_LOGIC.md`, `RULES.md`, `SCORING.md`, `SECURITY_LIMITATIONS.md`, `TESTING.md`.
 
 ### Data flow
 

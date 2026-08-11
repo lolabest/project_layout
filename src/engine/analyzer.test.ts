@@ -12,9 +12,9 @@ import { buildSrcDoc, validateMarkup, validateUrl } from './validation'
 import { rectsOverlap, getCssSelector, parsePx } from './domUtils'
 import { createReport, exportReportHtml, exportReportJson } from './reports'
 import type { ViewportSize } from '../models/types'
-import { PREDEFINED_VIEWPORTS } from '../models/types'
+import { MOBILE_VIEWPORT } from '../models/types'
 
-const vp = PREDEFINED_VIEWPORTS[0]
+const vp = MOBILE_VIEWPORT
 
 function makeDoc(html: string, css = ''): Document {
   const src = buildSrcDoc(html, css)
@@ -128,7 +128,7 @@ describe('analyzer checks', () => {
     Object.defineProperty(doc.documentElement, 'scrollWidth', { configurable: true, get: () => 2000 })
     Object.defineProperty(doc.body!, 'scrollWidth', { configurable: true, get: () => 2000 })
     expect(
-      detectHorizontalOverflow(doc, vp).some((i) => i.ruleId === 'horizontal-overflow.document'),
+      detectHorizontalOverflow(doc, vp).some((i) => i.ruleId === 'horizontal-overflow'),
     ).toBe(true)
   })
 
@@ -170,7 +170,7 @@ describe('analyzer checks', () => {
 })
 
 describe('reports', () => {
-  const viewport: ViewportSize = PREDEFINED_VIEWPORTS[0]
+  const viewport: ViewportSize = MOBILE_VIEWPORT
 
   it('creates JSON and HTML exports', () => {
     const report = createReport({

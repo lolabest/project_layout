@@ -32,14 +32,14 @@ import {
   buildViewportResult,
 } from './reports'
 import type { LayoutIssue } from '../models/types'
-import { PREDEFINED_VIEWPORTS } from '../models/types'
+import { MOBILE_VIEWPORT, TABLET_VIEWPORT, DESKTOP_VIEWPORT, PREDEFINED_VIEWPORTS } from '../models/types'
 
 function makeDoc(html: string, css = ''): Document {
   return new DOMParser().parseFromString(buildSrcDoc(html, css), 'text/html')
 }
 
 function issue(partial: Partial<LayoutIssue> & Pick<LayoutIssue, 'ruleId' | 'selector' | 'severity' | 'type'>): LayoutIssue {
-  const viewport = PREDEFINED_VIEWPORTS[0]
+  const viewport = MOBILE_VIEWPORT
   return {
     id: partial.id ?? `i-${Math.random()}`,
     ruleId: partial.ruleId,
@@ -71,7 +71,7 @@ describe('viewport validation', () => {
   })
 
   it('switches orientation by swapping sides', () => {
-    const mobile = PREDEFINED_VIEWPORTS[0]
+    const mobile = MOBILE_VIEWPORT
     const landscape = switchOrientation(mobile, 'landscape')
     expect(landscape.viewport.width).toBe(mobile.height)
     expect(landscape.viewport.height).toBe(mobile.width)
@@ -80,7 +80,7 @@ describe('viewport validation', () => {
   })
 
   it('applies presets with orientation', () => {
-    const preset = applyPreset(PREDEFINED_VIEWPORTS[1], 'landscape')
+    const preset = applyPreset(TABLET_VIEWPORT, 'landscape')
     expect(preset.width).toBe(1024)
     expect(preset.height).toBe(768)
   })
@@ -90,7 +90,7 @@ describe('scoring and sorting', () => {
   it('calculates health score with caps and labels', () => {
     const issues = [
       issue({ ruleId: 'a', selector: '#a', severity: 'critical', type: 'missing-alt' }),
-      issue({ ruleId: 'a', selector: '#a', severity: 'critical', type: 'missing-alt', viewport: PREDEFINED_VIEWPORTS[1] }),
+      issue({ ruleId: 'a', selector: '#a', severity: 'critical', type: 'missing-alt', viewport: TABLET_VIEWPORT }),
       issue({ ruleId: 'b', selector: '#b', severity: 'warning', type: 'overlapping' }),
       issue({ ruleId: 'c', selector: '#c', severity: 'info', type: 'broken-link' }),
     ]
@@ -125,9 +125,9 @@ describe('scoring and sorting', () => {
       }),
     ]
     const sorted = sortIssuesBySeverityThenDom(issues)
-    expect(sorted[0].severity).toBe('critical')
-    expect(sorted[1].severity).toBe('warning')
-    expect(sorted[2].severity).toBe('info')
+    expect(sorted[0]?.severity).toBe('critical')
+    expect(sorted[1]?.severity).toBe('warning')
+    expect(sorted[2]?.severity).toBe('info')
   })
 })
 
@@ -140,14 +140,14 @@ describe('issue dedupe and grouping', () => {
 
   it('groups across viewports', () => {
     const issues = [
-      issue({ ruleId: 'r', selector: '#x', severity: 'warning', type: 'fixed-width', viewport: PREDEFINED_VIEWPORTS[0] }),
-      issue({ ruleId: 'r', selector: '#x', severity: 'warning', type: 'fixed-width', viewport: PREDEFINED_VIEWPORTS[1] }),
+      issue({ ruleId: 'r', selector: '#x', severity: 'warning', type: 'fixed-width', viewport: MOBILE_VIEWPORT }),
+      issue({ ruleId: 'r', selector: '#x', severity: 'warning', type: 'fixed-width', viewport: TABLET_VIEWPORT }),
     ]
     const grouped = groupIssuesAcrossViewports(issues, PREDEFINED_VIEWPORTS.slice(0, 2))
     expect(grouped).toHaveLength(1)
-    expect(grouped[0].affectedViewports).toHaveLength(2)
-    expect(grouped[0].occursEverywhere).toBe(true)
-    expect(grouped[0].firstFailingViewport).toBe('mobile')
+    expect(grouped[0]?.affectedViewports).toHaveLength(2)
+    expect(grouped[0]?.occursEverywhere).toBe(true)
+    expect(grouped[0]?.firstFailingViewport).toBe('mobile')
   })
 })
 
@@ -180,19 +180,19 @@ describe('ignored issue persistence', () => {
     const base = [
       issue({ ruleId: 'r', selector: '#x', severity: 'info', type: 'broken-link' }),
     ]
-    const { ignoredKeys } = ignoreIssue(base, base[0].id, 'accepted')
+    const { ignoredKeys } = ignoreIssue(base, base[0]!.id, 'accepted')
     const nextRun = [
       issue({
         ruleId: 'r',
         selector: '#x',
         severity: 'info',
         type: 'broken-link',
-        viewport: PREDEFINED_VIEWPORTS[1],
+        viewport: TABLET_VIEWPORT,
       }),
     ]
     const applied = applyIgnoredState(nextRun, ignoredKeys)
-    expect(applied[0].lifecycle).toBe('ignored')
-    expect(applied[0].ignoreReason).toBe('accepted')
+    expect(applied[0]?.lifecycle).toBe('ignored')
+    expect(applied[0]?.ignoreReason).toBe('accepted')
   })
 })
 
@@ -205,7 +205,7 @@ describe('detection rules', () => {
       <button></button>
       <div id="dup"></div><span id="dup"></span>
     `)
-    const vp = PREDEFINED_VIEWPORTS[0]
+    const vp = MOBILE_VIEWPORT
     expect(detectMissingAlt(doc, vp).length).toBeGreaterThan(0)
     expect(detectBrokenLinks(doc, vp).length).toBeGreaterThan(0)
     expect(detectInaccessibleControls(doc, vp).length).toBeGreaterThan(0)
@@ -215,19 +215,19 @@ describe('detection rules', () => {
     const doc = makeDoc('<div>wide</div>')
     Object.defineProperty(doc.documentElement, 'scrollWidth', { configurable: true, get: () => 2000 })
     Object.defineProperty(doc.body!, 'scrollWidth', { configurable: true, get: () => 2000 })
-    const issues = detectHorizontalOverflow(doc, PREDEFINED_VIEWPORTS[0])
-    expect(issues.some((i) => i.ruleId === 'horizontal-overflow.document')).toBe(true)
-    expect(issues[0].measuredValues.overflowPx).toBeGreaterThan(0)
+    const issues = detectHorizontalOverflow(doc, MOBILE_VIEWPORT)
+    expect(issues.some((i) => i.ruleId === 'horizontal-overflow')).toBe(true)
+    expect(Number(issues[0]?.measuredValues.overflowPx)).toBeGreaterThan(0)
   })
 
   it('analyzeDocument returns LayoutIssue shape', () => {
     const doc = makeDoc('<img src="x.png" /><a href="#"></a>')
-    const result = analyzeDocument(doc, { viewport: PREDEFINED_VIEWPORTS[0] })
+    const result = analyzeDocument(doc, { viewport: MOBILE_VIEWPORT })
     expect(result.accessible).toBe(true)
     expect(result.healthScore).toBeDefined()
-    expect(result.issues[0].ruleId).toBeTruthy()
-    expect(result.issues[0].issueKey).toContain('::')
-    expect(result.issues[0].elementPath).toBeTruthy()
+    expect(result.issues[0]?.ruleId).toBeTruthy()
+    expect(result.issues[0]?.issueKey).toContain('::')
+    expect(result.issues[0]?.elementPath).toBeTruthy()
   })
 })
 
@@ -243,7 +243,7 @@ describe('sessions and reports', () => {
     const report = createReport({
       sourceName: 'Demo',
       sourceMode: 'markup',
-      viewport: PREDEFINED_VIEWPORTS[0],
+      viewport: MOBILE_VIEWPORT,
       issues: [
         issue({ ruleId: 'a11y.missing-alt', selector: 'img', severity: 'critical', type: 'missing-alt' }),
       ],
@@ -261,12 +261,12 @@ describe('sessions and reports', () => {
       issues: [],
     })
     saveSession(session)
-    expect(loadSessions()[0].id).toBe(session.id)
+    expect(loadSessions()[0]?.id).toBe(session.id)
   })
 
   it('finalizes multi-viewport status', () => {
-    const ok = buildViewportResult(PREDEFINED_VIEWPORTS[0], [], null, 'success')
-    const bad = buildViewportResult(PREDEFINED_VIEWPORTS[1], [], null, 'failed')
+    const ok = buildViewportResult(MOBILE_VIEWPORT, [], null, 'success')
+    const bad = buildViewportResult(TABLET_VIEWPORT, [], null, 'failed')
     expect(finalizeSessionStatus([ok, ok])).toBe('Completed')
     expect(finalizeSessionStatus([ok, bad])).toBe('Completed with errors')
     expect(finalizeSessionStatus([bad, bad])).toBe('Failed')
@@ -292,8 +292,8 @@ describe('touch targets mobile only', () => {
         },
       })
     }) as typeof window.getComputedStyle
-    expect(detectSmallTouchTargets(doc, PREDEFINED_VIEWPORTS[3]).length).toBe(0)
-    expect(detectSmallTouchTargets(doc, PREDEFINED_VIEWPORTS[0]).length).toBeGreaterThan(0)
+    expect(detectSmallTouchTargets(doc, DESKTOP_VIEWPORT).length).toBe(0)
+    expect(detectSmallTouchTargets(doc, MOBILE_VIEWPORT).length).toBeGreaterThan(0)
     window.getComputedStyle = original
   })
 })

@@ -31,7 +31,10 @@ export type SourceState =
 
 export type TestStatus =
   | 'Draft'
+  | 'Queued'
   | 'Running'
+  | 'Cancelling'
+  | 'Cancelled'
   | 'Completed'
   | 'Completed with errors'
   | 'Failed'
@@ -312,6 +315,11 @@ export const PREDEFINED_VIEWPORTS: ViewportSize[] = [
   { id: 'laptop', name: 'Laptop', width: 1440, height: 900, predefined: true },
   { id: 'desktop', name: 'Desktop', width: 1920, height: 1080, predefined: true },
 ]
+
+export const MOBILE_VIEWPORT: ViewportSize = PREDEFINED_VIEWPORTS[0]!
+export const TABLET_VIEWPORT: ViewportSize = PREDEFINED_VIEWPORTS[1]!
+export const LAPTOP_VIEWPORT: ViewportSize = PREDEFINED_VIEWPORTS[2]!
+export const DESKTOP_VIEWPORT: ViewportSize = PREDEFINED_VIEWPORTS[3]!
 
 export const VIEWPORT_LIMITS = {
   minWidth: 240,

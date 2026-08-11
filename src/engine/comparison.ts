@@ -69,9 +69,15 @@ export async function compareImages(
   const pixelCount = width * height
 
   for (let i = 0; i < refData.data.length; i += 4) {
-    const dr = Math.abs(refData.data[i] - renderedData.data[i])
-    const dg = Math.abs(refData.data[i + 1] - renderedData.data[i + 1])
-    const db = Math.abs(refData.data[i + 2] - renderedData.data[i + 2])
+    const r1 = refData.data[i] ?? 0
+    const g1 = refData.data[i + 1] ?? 0
+    const b1 = refData.data[i + 2] ?? 0
+    const r2 = renderedData.data[i] ?? 0
+    const g2 = renderedData.data[i + 1] ?? 0
+    const b2 = renderedData.data[i + 2] ?? 0
+    const dr = Math.abs(r1 - r2)
+    const dg = Math.abs(g1 - g2)
+    const db = Math.abs(b1 - b2)
     const channelDiff = (dr + dg + db) / 3
     totalDiff += channelDiff
 

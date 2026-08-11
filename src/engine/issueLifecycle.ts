@@ -114,8 +114,10 @@ export function groupIssuesAcrossViewports(
 
   for (const [, list] of map) {
     const representative = list[0]
+    if (!representative) continue
     const affected = Array.from(new Set(list.map((i) => i.viewport.id)))
-    const first = viewportIds.find((id) => affected.includes(id)) ?? affected[0]
+    const first =
+      viewportIds.find((id) => affected.includes(id)) ?? affected[0] ?? representative.viewport.id
     groups.push({
       issueKey: buildCrossViewportKey(representative.ruleId, representative.selector),
       ruleId: representative.ruleId,

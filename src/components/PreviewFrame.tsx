@@ -432,8 +432,9 @@ function buildQuickSelector(element: Element): string {
   let current: Element | null = element
   while (current && path.length < 4) {
     let part = current.tagName.toLowerCase()
-    if (current.classList.length) {
-      part += `.${escape(current.classList[0])}`
+    const firstClass = current.classList.item(0)
+    if (firstClass) {
+      part += `.${escape(firstClass)}`
     }
     const parentEl: Element | null = current.parentElement
     if (parentEl) {
