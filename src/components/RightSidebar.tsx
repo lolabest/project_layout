@@ -210,7 +210,8 @@ export function RightSidebar(props: RightSidebarProps) {
                       <strong>Fix:</strong> {issue.recommendation}
                     </p>
                     <div className={styles.meta}>
-                      {issue.viewport.name} · confidence {Math.round(issue.confidence * 100)}%
+                      {issue.viewport?.name ?? 'viewport'} · confidence{' '}
+                      {Math.round((issue.confidence ?? 0) * 100)}%
                       {issue.affectedViewports && issue.affectedViewports.length > 1
                         ? ` · ${issue.affectedViewports.length} viewports`
                         : ''}
